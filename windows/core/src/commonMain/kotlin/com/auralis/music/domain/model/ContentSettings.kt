@@ -16,7 +16,7 @@ enum class ProxyType { HTTP, SOCKS }
 
 /** Lyrics providers the user can switch off (see LyricsClient.isProviderEnabled). */
 enum class LyricsProviderId(val displayName: String, val description: String) {
-    SPICY_LYRICS("Spicy Lyrics", "Synced lyrics via matching Spotify recordings; requires a publishable key"),
+    SPICY_LYRICS("Spicy Lyrics", "Synced lyrics via matching Spotify recordings"),
     LRCLIB("LRCLIB", "Open, community-synced lyrics database"),
     KUGOU("KuGou", "Large catalogue with word-timed lyrics"),
     QQMUSIC("QQ Music", "Word-timed syllables and rich lyrics from QQ Music"),
@@ -25,7 +25,6 @@ enum class LyricsProviderId(val displayName: String, val description: String) {
     LYRICS_PLUS("LyricsPlus", "YouLy+ backend (Apple, QQ, Deezer)"),
     UNISON("Unison", "Community word-synced lyrics"),
     AMLL("AMLL", "Apple Music-style TTML lyrics"),
-    MUSIXMATCH("Musixmatch", "Rich-sync word-timed lyrics"),
     NETEASE("NetEase", "NetEase Cloud Music lyrics"),
     JIOSAAVN("JioSaavn", "Indian catalogue lyrics"),
     YOUTUBE_MUSIC("YouTube Music", "Lyrics shown in YouTube Music (unsynced)"),

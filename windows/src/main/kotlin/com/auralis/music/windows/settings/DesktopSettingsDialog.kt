@@ -9,6 +9,13 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.*
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.foundation.layout.*
 import com.auralis.music.ui.components.toggleable
 import androidx.compose.ui.semantics.Role
@@ -184,24 +191,6 @@ internal fun AppearanceSettingsPane(store: AppearanceSettingsDataStore) {
 // 2. PLAYER & AUDIO SETTINGS PANE
 // ═══════════════════════════════════════════════════════════════════════
 
-/** Kept in Playback so credentials remain accessible without a Content settings tab. */
-@Composable
-internal fun SpicyLyricsKeySetting(store: ContentSettingsDataStore) {
-    val settings by store.settingsFlow.collectAsState(ContentSettings())
-    val scope = rememberCoroutineScope()
-    fun update(transform: ContentSettings.() -> ContentSettings) {
-        scope.launch { store.update { current -> current.transform() } }
-    }
-    SettingTextField("Spicy Lyrics key override (optional)",
-        "Auralis uses its included key automatically. Leave blank, or enter your own native publishable sl_pk_ key.",
-        settings.spicyLyricsApiKey, isPassword = true,
-        onValue = { update { copy(spicyLyricsApiKey = it.trim()) } })
-    if (settings.spicyLyricsApiKey.isNotBlank() &&
-        !com.auralis.music.data.network.provider.SpicyLyricsSource.isNativeKey(settings.spicyLyricsApiKey.trim())) {
-        Text("Enter a publishable sl_pk_ key. Server secret keys are not supported.", color = MaterialTheme.colorScheme.error)
-    }
-}
-
 @Composable
 internal fun ContentSettingsPane(store: ContentSettingsDataStore) {
     val settings by store.settingsFlow.collectAsState(ContentSettings())
@@ -257,21 +246,6 @@ internal fun ContentSettingsPane(store: ContentSettingsDataStore) {
         )
     }
 
-    SettingsGroup("Lyrics providers") {
-        Text(desktopText("Active providers are queried in priority order for synchronous and word-timed lyrics."), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        LyricsProviderId.entries.forEach { provider ->
-            val enabled = provider !in settings.disabledLyricsProviders
-            SettingToggle(
-                title = provider.displayName,
-                description = provider.description,
-                checked = enabled,
-                onChecked = { isChecked ->
-                    val updated = if (isChecked) settings.disabledLyricsProviders - provider else settings.disabledLyricsProviders + provider
-                    update { copy(disabledLyricsProviders = updated) }
-                }
-            )
-        }
-    }
 
     SettingsGroup("Lyrics romanization") {
         SettingToggle("Romanize lyrics", "Show pronunciation below supported lyrics", settings.romanizationEnabled) {
@@ -409,8 +383,35 @@ internal fun SettingButtonRow(title: String, description: String? = null, button
                     Text(desktopText(description), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-            OutlinedButton(onClick = onClick) { Text(desktopText(button)) }
+            SettingPillButton(desktopText(button), destructive = button.startsWith("Clear") || button.startsWith("Delete"), onClick = onClick)
         }
+    }
+}
+
+/**
+ * The action on the right of a settings row: a soft filled pill that brightens on hover and dips on
+ * press. [destructive] (clearing or deleting) tints it red so it reads as the one to think about.
+ */
+@Composable
+internal fun SettingPillButton(text: String, destructive: Boolean = false, enabled: Boolean = true, onClick: () -> Unit) {
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+    val pressed by interaction.collectIsPressedAsState()
+    val danger = Color(0xFFFF6B6B)
+    val base = if (destructive) danger else MaterialTheme.colorScheme.onSurface
+    val fill by animateColorAsState(base.copy(alpha = if (!enabled) .05f else if (hovered) .20f else .12f), tween(120), label = "pillFill")
+    val scale by animateFloatAsState(if (pressed) .95f else 1f, spring(stiffness = Spring.StiffnessMediumLow), label = "pillScale")
+    Box(
+        Modifier.graphicsLayer { scaleX = scale; scaleY = scale }
+            .clip(RoundedCornerShape(50)).background(fill)
+            .hoverable(interaction, enabled)
+            .clickable(interaction, indication = null, enabled = enabled, role = Role.Button, onClick = onClick)
+            .then(if (enabled) Modifier.pointerHoverIcon(PointerIcon.Hand) else Modifier)
+            .padding(horizontal = 18.dp, vertical = 9.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(text, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold,
+            color = (if (destructive) danger else MaterialTheme.colorScheme.onSurface).copy(alpha = if (enabled) 1f else .4f))
     }
 }
 
@@ -443,30 +444,8 @@ internal fun SettingChoice(title: String, description: String? = null, selected:
     }
 
     if (expanded) {
-        AlertDialog(
-            onDismissRequest = { expanded = false },
-            title = { Text(desktopText(title)) },
-            containerColor = Color(0xFF1C1A22),
-            text = {
-                Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    options.forEach { option ->
-                        SettingsHoverSurface(
-                            onClick = { onSelect(option); expanded = false },
-                            shape = RoundedCornerShape(10.dp),
-                            color = if (option == selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f) else Color.White.copy(alpha = 0.05f),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                                RadioButton(selected = option == selected, onClick = null)
-                                Spacer(Modifier.width(10.dp))
-                                Text(desktopText(option), fontWeight = if (option == selected) FontWeight.Bold else FontWeight.Normal)
-                            }
-                        }
-                    }
-                }
-            },
-            confirmButton = { TextButton(onClick = { expanded = false }) { Text(desktopText("Done")) } }
-        )
+        GlassPickerDialog(desktopText(title), options.map { it to desktopText(it) }, selected,
+            onDismiss = { expanded = false }, onSelect = onSelect)
     }
 }
 
@@ -529,46 +508,9 @@ internal fun SettingSearchableChoice(
     }
 
     if (expanded) {
-        AlertDialog(
-            onDismissRequest = { expanded = false },
-            title = { Text(desktopText(title)) },
-            containerColor = Color(0xFF1C1A22),
-            text = {
-                val languageRevision = com.auralis.music.ui.i18n.StringLookup.revision.intValue
-                val filtered = remember(filterText, options, languageRevision) {
-                    if (filterText.isBlank()) options
-                    else options.filter { it.second.contains(filterText, ignoreCase = true) || it.first.contains(filterText, ignoreCase = true) || desktopText(it.second).contains(filterText, ignoreCase = true) }
-                }
-
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.width(360.dp).heightIn(max = 420.dp)) {
-                    OutlinedTextField(
-                        value = filterText,
-                        onValueChange = { filterText = it },
-                        placeholder = { Text(desktopText("Search...")) },
-                        modifier = Modifier.fillMaxWidth().reportTypingFocus(),
-                        singleLine = true
-                    )
-                    LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        items(filtered) { (key, display) ->
-                            val isSel = key == selectedKey
-                            SettingsHoverSurface(
-                                onClick = { onSelect(key); expanded = false },
-                                shape = RoundedCornerShape(8.dp),
-                                color = if (isSel) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f) else Color.White.copy(alpha = 0.04f),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    RadioButton(selected = isSel, onClick = null)
-                                    Spacer(Modifier.width(8.dp))
-                                    Text(if (key.isBlank() || display == "System default" || display == "Default") desktopText(display) else display, fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal)
-                                }
-                            }
-                        }
-                    }
-                }
-            },
-            confirmButton = { TextButton(onClick = { expanded = false }) { Text(desktopText("Cancel")) } }
-        )
+        GlassPickerDialog(desktopText(title),
+            options.map { (key, display) -> key to (if (key.isBlank() || display == "System default" || display == "Default") desktopText(display) else display) },
+            selectedKey, searchable = true, onDismiss = { expanded = false }, onSelect = onSelect)
     }
 }
 

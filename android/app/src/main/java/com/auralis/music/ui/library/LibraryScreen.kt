@@ -106,6 +106,10 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.gestures.animateScrollBy
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -932,6 +936,17 @@ com.auralis.music.ui.theme.ArtworkThemed(selectedPl.coverUrl ?: selectedPl.track
                 order = uiState.sortOrder,
                 recentPlayedAtByTrackId = uiState.recentPlayedAtByTrackId
             )
+            // Saved artists belong to "All" as well as the Artists pill (as on Windows), after the
+            // playlists, matching the library search and sort order.
+            val displayedArtists = if (sourceFilter == null || sourceFilter == LibrarySourceFilter.ARTISTS)
+                uiState.savedArtists.filter { it.name.contains(searchQuery, ignoreCase = true) }.distinctBy { it.id }.let { artists ->
+                    when (uiState.sortOrder) {
+                        "Alphabetical (A to Z)" -> artists.sortedBy { it.name.lowercase(Locale.ROOT) }
+                        "Alphabetical (Z to A)" -> artists.sortedByDescending { it.name.lowercase(Locale.ROOT) }
+                        else -> artists.sortedByDescending { it.savedAt }
+                    }
+                } else emptyList()
+            val artistsHeading = sourceFilter == null && displayedArtists.isNotEmpty()
             val pinContext = androidx.compose.ui.platform.LocalContext.current
             remember { LibraryPinStore.load(pinContext) }
             val pinnedIds by LibraryPinStore.pinned
@@ -997,11 +1012,6 @@ com.auralis.music.ui.theme.ArtworkThemed(selectedPl.coverUrl ?: selectedPl.track
                             if (showCollectionShelf) {
                                 item(key = "library_collections", span = { GridItemSpan(maxLineSpan) }) { collectionShelf() }
                             }
-                            if (sourceFilter == LibrarySourceFilter.ARTISTS) {
-                                items(uiState.savedArtists, key = { "artist_${it.id}" }, contentType = { "artist" }) { artist ->
-                                    LibraryArtistGridCard(artist) { onOpenArtist(Artist(id = artist.id, name = artist.name, thumbnail = artist.thumbnail)) }
-                                }
-                            }
                             gridItemsIndexed(libraryPlaylists, key = { _, it -> it.id }, contentType = { _, _ -> "playlist" }) { index, playlist ->
                                 Box(modifier = (if (gridAnimate) Modifier.animateItem() else Modifier).layoutSwitchEntrance(index, layoutSwitchedAt)) {
                                     UserPlaylistGridCard(
@@ -1011,6 +1021,12 @@ com.auralis.music.ui.theme.ArtworkThemed(selectedPl.coverUrl ?: selectedPl.track
                                         onLongClick = { selectedPlaylistForMenu = playlist }
                                     )
                                 }
+                            }
+                            if (artistsHeading) {
+                                item(key = "library_artists_heading", span = { GridItemSpan(maxLineSpan) }) { LibraryArtistsHeading(displayedArtists.size) }
+                            }
+                            items(displayedArtists, key = { "artist_${it.id}" }, contentType = { "artist" }) { artist ->
+                                LibraryArtistGridCard(artist) { onOpenArtist(Artist(id = artist.id, name = artist.name, thumbnail = artist.thumbnail)) }
                             }
                         }
                     } else {
@@ -1037,11 +1053,6 @@ com.auralis.music.ui.theme.ArtworkThemed(selectedPl.coverUrl ?: selectedPl.track
                             if (showCollectionShelf) {
                                 item(key = "library_collections", contentType = "collections") { collectionShelf() }
                             }
-                            if (sourceFilter == LibrarySourceFilter.ARTISTS) {
-                                items(uiState.savedArtists, key = { "artist_${it.id}" }, contentType = { "artist" }) { artist ->
-                                    LibraryArtistRow(artist) { onOpenArtist(Artist(id = artist.id, name = artist.name, thumbnail = artist.thumbnail)) }
-                                }
-                            }
                             itemsIndexed(
                                 items = libraryPlaylists,
                                 key = { _, it -> it.id },
@@ -1055,6 +1066,10 @@ com.auralis.music.ui.theme.ArtworkThemed(selectedPl.coverUrl ?: selectedPl.track
                                         onLongClick = { selectedPlaylistForMenu = playlist }
                                     )
                                 }
+                            }
+                            if (artistsHeading) item(key = "library_artists_heading", contentType = "heading") { LibraryArtistsHeading(displayedArtists.size) }
+                            items(displayedArtists, key = { "artist_${it.id}" }, contentType = { "artist" }) { artist ->
+                                LibraryArtistRow(artist) { onOpenArtist(Artist(id = artist.id, name = artist.name, thumbnail = artist.thumbnail)) }
                             }
                         }
                     }
@@ -1909,6 +1924,33 @@ private fun PlaylistDetailView(
     ) {
         androidx.compose.foundation.lazy.LazyListState()
     }
+    // Rows ripple into place when the page opens at the top, and after a jump back up.
+    val cascade = rememberPlaylistCascade()
+    val pageScope = rememberCoroutineScope()
+    LaunchedEffect(playlist.id) {
+        if (playlistListState.firstVisibleItemIndex == 0 && playlistListState.firstVisibleItemScrollOffset == 0) {
+            cascade.play()
+        }
+    }
+    var jumpJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    fun jumpToTop() {
+        if (jumpJob?.isActive == true) return
+        jumpJob = pageScope.launch {
+            if (playlistListState.firstVisibleItemIndex > 15) {
+                // A long way down: land at the top at once and let the page ripple back in.
+                playlistListState.scrollToItem(0)
+                cascade.play()
+            } else {
+                // The animated scroll estimates rows it hasn't measured (the header is much
+                // taller than a song), so it could stop short partway up. Finish the job if so.
+                runCatching { playlistListState.animateScrollToItem(0) }
+                if (playlistListState.firstVisibleItemIndex != 0 || playlistListState.firstVisibleItemScrollOffset != 0) {
+                    playlistListState.animateScrollBy(-playlistListState.playlistHeaderScrollPx().coerceAtMost(4000f))
+                    playlistListState.scrollToItem(0)
+                }
+            }
+        }
+    }
 
     // Rows keep their ids when the playlist is reloaded, so ticks and keys survive a save.
     fun syncLocalItems(tracks: List<Track>) {
@@ -2173,6 +2215,13 @@ private fun PlaylistDetailView(
     // The page runs up behind the status bar so the cover continues under it (no band of page
     // colour above the artwork); the buttons and the search bar stay below it.
     val statusBarInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    // The hero cover is a full-width square; the title sits 72dp above its bottom edge.
+    val heroCoverPx = with(density) { androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp.dp.toPx() }
+    val cascadeRisePx = with(density) { 22.dp.toPx() }
+    val collapseAtPx = heroCoverPx - with(density) { (72.dp + statusBarInset + 58.dp - 34.dp).toPx() }
+    val headerCollapsed by remember(playlistListState, collapseAtPx) {
+        androidx.compose.runtime.derivedStateOf { playlistListState.playlistHeaderScrollPx() > collapseAtPx }
+    }
     val topBar: @Composable () -> Unit = {
         Row(
             modifier = Modifier
@@ -2255,10 +2304,11 @@ private fun PlaylistDetailView(
                     }
                 }
                 // Header Content
-                item(key = "playlist_header", contentType = "header") {
+                item(key = PLAYLIST_HEADER_KEY, contentType = "header") {
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .playlistCascadeLayer(cascade, { 0 }, cascadeRisePx)
                             .padding(horizontal = 24.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
@@ -2305,6 +2355,8 @@ private fun PlaylistDetailView(
                                             placeable.place(-sidePad, 0)
                                         }
                                     }
+                                    // Trails the page as it scrolls, softening as it goes.
+                                    .playlistHeroDrift(playlistListState) { heroCoverPx }
                                     .background(CARD_DARK_BG)
                                     .layerBackdrop(heroBackdrop)
                             } else Modifier
@@ -2625,7 +2677,7 @@ private fun PlaylistDetailView(
                     items = displayedItems,
                     key = { _, item -> item.instanceId },
                     contentType = { _, _ -> "song" }
-                ) { _, item ->
+                ) { songIndex, item ->
                     val track = item.track
                     val isCurrent = track.id == currentTrackId
                     val isItemBeingDragged = draggingInstanceId == item.instanceId
@@ -2770,7 +2822,8 @@ private fun PlaylistDetailView(
                             selectedIds.removeAll { it in removed }
                             localItems.removeAll { it.track.id == trackId }
                             onRemoveTrack(trackId)
-                        }
+                        },
+                        modifier = Modifier.playlistCascadeLayer(cascade, { songIndex + 1 }, cascadeRisePx)
                     )
                 }
 
@@ -2783,6 +2836,27 @@ private fun PlaylistDetailView(
                     )
                     Spacer(Modifier.height(room))
                 }
+            }
+
+            // A fast scroller for long playlists: slides in while scrolling; hold and drag the handle.
+            if (displayedItems.size > 40 && !isDragging) {
+                val chromePadding = bottomChromePadding()
+                PlaylistFastScroller(
+                    state = playlistListState,
+                    songCount = displayedItems.size,
+                    // The songs follow the header (and the search-bar gap when the glass header is on).
+                    firstSongIndex = if (glassHero) 2 else 1,
+                    songAt = { displayedItems.getOrNull(it)?.track },
+                    listTopInRoot = { listTopInRoot },
+                    // The list is this glass's backdrop and the scroller sits outside it, so it can be a lens.
+                    glass = barGlass,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(
+                            top = statusBarInset + 72.dp,
+                            bottom = chromePadding.calculateBottomPadding() + 8.dp
+                        )
+                )
             }
 
             // ================================================================
@@ -2906,6 +2980,25 @@ private fun PlaylistDetailView(
             }
         }
     }
+    // Drawn before the top bar so the back button sits over it. Once the title has slid under the bar, a chip with the cover and name takes its place
+    // beside the back button; tapping it goes back to the top.
+    if (glassHero) {
+        val chipModifier: Modifier = if (barGlass != null) {
+            Modifier.liquidGlass(barGlass, RoundedCornerShape(23.dp), tint = com.auralis.music.ui.glass.glassBarTint(barGlass.isDark),
+                blurRadius = com.auralis.music.ui.glass.ARTWORK_GLASS_BLUR, vibrant = false)
+        } else Modifier.clip(RoundedCornerShape(23.dp)).background(MaterialTheme.colorScheme.surfaceContainerHigh)
+        PlaylistCollapsedTitle(
+            visible = headerCollapsed && !isSearchActive,
+            title = playlist.title,
+            chipModifier = chipModifier,
+            textColor = topBarIcon,
+            onClick = { jumpToTop() },
+            cover = { PlaylistCoverArt(playlist, savedAlbums, cornerRadius = 9.dp) },
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(start = 14.dp + 46.dp + 10.dp, top = statusBarInset + 12.dp)
+        )
+    }
     // Floats over the hero cover in liquid glass mode.
     if (glassHero) topBar()
     }
@@ -2955,11 +3048,7 @@ internal fun PlaylistOptionsBottomSheet(
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val coroutineScope = rememberCoroutineScope()
-    val syncPlaylist = LocalPlaylistSync.current.takeUnless {
-        com.auralis.music.data.playlistsync.PlaylistSyncStore.imported(playlist.id)?.first ==
-            com.auralis.music.data.playlistsync.SyncService.SPOTIFY ||
-            playlist.id.startsWith("sp_") || playlist.id.startsWith("spotify:")
-    }
+    val syncPlaylist = LocalPlaylistSync.current
     var activeDialog by remember { mutableStateOf(initialDialog) }
 
     var editTitle by remember(playlist.title) { mutableStateOf(playlist.title) }
@@ -2981,7 +3070,16 @@ internal fun PlaylistOptionsBottomSheet(
     }
 
     val isSmartPlaylistMenu = playlist.id.startsWith("smart_")
-    val coverUrl = playlist.coverUrl ?: playlist.tracks.firstOrNull()?.thumbnail
+    // Same rule as the Library card: the playlist's own cover unless the card shows a song collage
+    // (blank cover, or one that's replaced by its songs), then that collage's first song. A blank
+    // saved cover used to slip past `?:` and leave a music note with no background.
+    val coverUrl = remember(playlist.coverUrl, playlist.tracks) {
+        val distinct = getDistinctArtworkTracks(playlist.tracks)
+        playlist.coverUrl?.takeIf { it.isNotBlank() && !usesTrackCollage(playlist, distinct.size) }
+            ?: distinct.firstOrNull { !it.thumbnail.isNullOrBlank() }?.thumbnail
+            ?: playlist.tracks.firstOrNull { !it.thumbnail.isNullOrBlank() }?.thumbnail
+            ?: playlist.coverUrl?.takeIf { it.isNotBlank() }
+    }
     fun addPlaylistToQueue() {
         onAddToQueue?.invoke(playlist.tracks)
         Toast.makeText(context, str(R.string.added_x_tracks_to_queue, playlist.tracks.size), Toast.LENGTH_SHORT).show()
@@ -3246,7 +3344,7 @@ internal fun PlaylistOptionsBottomSheet(
                                     modifier = Modifier.padding(horizontal = 16.dp)
                                 )
                                 PlaylistActionRow(icon = Icons.Default.Sync,
-                                    title = "Playlist sync", subtitle = "Link YouTube Music · two-way sync",
+                                    title = "Playlist sync", subtitle = "YouTube Music or Spotify · two-way sync",
                                     onClick = { onDismiss(); syncPlaylist(playlist) })
                             }
                         }
@@ -3806,6 +3904,14 @@ private fun androidx.compose.foundation.lazy.LazyItemScope.PlaylistTrackRow(
     val currentDrag by androidx.compose.runtime.rememberUpdatedState(onReorderDrag)
     val currentDragEnd by androidx.compose.runtime.rememberUpdatedState(onReorderDragEnd)
     val currentDragCancel by androidx.compose.runtime.rememberUpdatedState(onReorderDragCancel)
+    // The drag gesture lives on this row's handle. If auto-scroll (or a fast flick) carries the
+    // row past the list's edge, the list would dispose it, which kills the gesture and cancels
+    // the drag midway. Keep the row alive for as long as it is being dragged.
+    val pinnable = androidx.compose.ui.layout.LocalPinnableContainer.current
+    androidx.compose.runtime.DisposableEffect(isItemBeingDragged, pinnable) {
+        val handle = if (isItemBeingDragged) pinnable?.pin() else null
+        onDispose { handle?.release() }
+    }
 
     com.auralis.music.ui.components.SwipeableTrackContainer(
         onPlayNext = onPlayNext?.let { { it(track) } },
@@ -3929,17 +4035,35 @@ private fun androidx.compose.foundation.lazy.LazyItemScope.PlaylistTrackRow(
                         .size(36.dp)
                         .onGloballyPositioned { handleTopInRoot = it.positionInRoot().y }
                         .pointerInput(isCustomSort) {
-                            detectDragGesturesAfterLongPress(
-                                onDragStart = { offset ->
-                                    currentDragStart(handleTopInRoot - currentListTop + offset.y)
-                                },
-                                onDrag = { change, amount ->
-                                    change.consume()
-                                    currentDrag(amount.y)
-                                },
-                                onDragEnd = { currentDragEnd() },
-                                onDragCancel = { currentDragCancel() }
-                            )
+                            // Not detectDragGesturesAfterLongPress: that gives up the moment any
+                            // other handler consumes the move (or the system cuts the touch), so
+                            // a drag passing over the status bar or the navigation bar was
+                            // cancelled and the song snapped back. This follows the finger until
+                            // it lifts, and a touch the system ends drops the song where it is.
+                            awaitEachGesture {
+                                val down = awaitFirstDown(requireUnconsumed = false)
+                                val held = awaitLongPressOrCancellation(down.id) ?: return@awaitEachGesture
+                                currentDragStart(handleTopInRoot - currentListTop + held.position.y)
+                                var finished = false
+                                try {
+                                    while (true) {
+                                        val event = awaitPointerEvent()
+                                        val change = event.changes.firstOrNull { it.id == held.id } ?: break
+                                        if (!change.pressed) {
+                                            change.consume()
+                                            break
+                                        }
+                                        val dy = change.position.y - change.previousPosition.y
+                                        if (dy != 0f) currentDrag(dy)
+                                        change.consume()
+                                    }
+                                    finished = true
+                                    currentDragEnd()
+                                } catch (e: kotlinx.coroutines.CancellationException) {
+                                    if (!finished) currentDragCancel()
+                                    throw e
+                                }
+                            }
                         },
                     contentAlignment = Alignment.Center
                 ) {
@@ -4246,6 +4370,18 @@ private fun LibrarySortMenu(
                 if (isSelected) Icon(Icons.Default.Check, null, tint = LIME_TEXT, modifier = Modifier.size(18.dp))
             }
         }
+    }
+}
+
+/** Separates saved artists from the playlists above them under "All". */
+@Composable
+private fun LibraryArtistsHeading(count: Int) {
+    Row(Modifier.fillMaxWidth().padding(top = 8.dp, start = 4.dp), verticalAlignment = Alignment.Bottom) {
+        Text("Artists", color = MaterialTheme.colorScheme.onBackground,
+            fontWeight = FontWeight.Bold, fontSize = 20.sp)
+        Spacer(Modifier.width(8.dp))
+        Text("$count", color = MaterialTheme.colorScheme.onBackground.copy(alpha = .55f), fontSize = 14.sp,
+            modifier = Modifier.padding(bottom = 2.dp))
     }
 }
 

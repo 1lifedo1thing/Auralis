@@ -49,6 +49,7 @@ import com.auralis.music.domain.model.*
 import com.auralis.music.domain.repository.HistoryRepository
 import com.auralis.music.domain.repository.SearchRepository
 import com.auralis.music.windows.discord.*
+import com.auralis.music.windows.recordPopupGlass
 import com.auralis.music.windows.update.DesktopReleases
 import com.auralis.music.windows.update.DesktopUpdater
 import com.auralis.music.windows.update.updateStatusText
@@ -109,6 +110,7 @@ internal fun SettingsPopupOverlay(modifier: Modifier = Modifier, onDismiss: () -
     val focus = remember { FocusRequester() }
     val opening = remember { Animatable(0f) }
     val firstDraw = remember { CompletableDeferred<Unit>() }
+    val settingsGlass = com.auralis.music.windows.rememberPopupGlassSource()
     LaunchedEffect(Unit) { focus.requestFocus() }
     LaunchedEffect(Unit) {
         firstDraw.await()
@@ -123,7 +125,8 @@ internal fun SettingsPopupOverlay(modifier: Modifier = Modifier, onDismiss: () -
     }.focusRequester(focus).focusable().drawWithContent {
         drawContent()
         firstDraw.complete(Unit)
-    }, contentAlignment = Alignment.Center) {
+    // Glass popups opened from Settings sample Settings itself, not the page behind the overlay.
+    }.recordPopupGlass(settingsGlass), contentAlignment = Alignment.Center) {
         Box(Modifier.matchParentSize().graphicsLayer { alpha = opening.value }
             .background(Color.Black.copy(alpha = .58f))
             .clickable(remember { MutableInteractionSource() }, indication = null, onClick = onDismiss))
@@ -149,6 +152,7 @@ internal fun SettingsPopupOverlay(modifier: Modifier = Modifier, onDismiss: () -
         MaterialTheme(colorScheme = popupScheme) {
         CompositionLocalProvider(
             com.auralis.music.ui.components.LocalGlassDialogHost provides { dismiss, dialog -> SettingsOptionPopup(dismiss, dialog) },
+            com.auralis.music.windows.LocalPopupGlassSource provides settingsGlass,
             LocalScrollbarStyle provides LocalScrollbarStyle.current.copy(
             thickness = 4.dp,
             unhoverColor = scheme.onSurface.copy(alpha = .20f),
@@ -272,7 +276,7 @@ internal fun SettingsWindowContent(stores: SettingsStores, history: HistoryRepos
                         SettingsTab.HOTKEYS -> HotkeysPane()
                         SettingsTab.DATA -> DataPane(stores)
                         SettingsTab.UPDATES -> UpdatesPane()
-                        SettingsTab.ABOUT -> AboutPane()
+                        SettingsTab.ABOUT -> AboutPane(onCheckForUpdates = { selected = SettingsTab.UPDATES; jump = null })
                         SettingsTab.CONTENT -> ContentSettingsPane(stores.content)
                         SettingsTab.PRIVACY -> PrivacySettingsPane(stores.privacy, history, search)
                         else -> Unit
@@ -457,31 +461,12 @@ internal fun SettingsSearchField(value: String, onSubmit: () -> Unit = {}, onVal
         SettingToggle("Sticky shuffle", "Keep shuffling when you start a different album or playlist", prefs.bool("stickyShuffle")) { prefs.set("stickyShuffle", it) }
         SettingToggle("Shuffle whole queue", "When shuffling, include earlier songs while retaining the current track", prefs.bool("shuffleWholeQueue")) { prefs.set("shuffleWholeQueue",it) }
     }
-    SettingsGroup("Video") {
-        SettingToggle("Music videos", "Show a synchronized video in the sidebar when the playing recording has one. Audio continues independently.",prefs.bool("musicVideos")) {prefs.set("musicVideos",it)}
-        if(prefs.bool("musicVideos")) SettingToggle("Ambient light", "Sample the video colours for the sidebar background",prefs.bool("ambientVideo",true)) {prefs.set("ambientVideo",it)}
+    SettingsGroup("Search") {
         SettingToggle("Hide music videos in search", "Show audio recordings instead of video results on your next search",prefs.bool("hideVideos")) {prefs.set("hideVideos",it)}
     }
     SettingsBlockedArtistsSection()
-    SettingsGroup("Advanced · stream clients") {
-        Text(desktopText("These are the clients supported by Auralis's extractor. Keep at least one enabled. Changes apply to the next stream lookup."),style=MaterialTheme.typography.bodySmall)
-        val enabled=prefs.text("streamClients","VISIONOS").split(',').toSet()
-        for(client in listOf("VISIONOS","IOS")) SettingToggle(client,checked=client in enabled,onChecked={on->
-            val next=if(on) enabled+client else enabled-client
-            if(next.isNotEmpty()) prefs.set("streamClients",next.joinToString(","))
-        })
-    }
-    SettingsGroup("Lyrics source order") {
-        SpicyLyricsKeySetting(stores.content)
-        val available=com.auralis.music.data.network.LyricsClient.PICK_ORDER.filter {it !in setOf(LyricsProvider.LOCAL,LyricsProvider.YOUTUBE_CAPTIONS)}
-        val chosen=prefs.text("lyricsPriority").split(',').mapNotNull {name->runCatching {LyricsProvider.valueOf(name)}.getOrNull()}
-        SettingToggle("Use custom source priority", "Try enabled sources in this order before automatic fallback. Applies to newly fetched lyrics.",chosen.isNotEmpty()) {prefs.set("lyricsPriority",if(it) available.joinToString(",") {p->p.name} else "")}
-        if(chosen.isNotEmpty()) chosen.forEachIndexed {index,provider->Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
-            Text(provider.name.replace('_',' '),Modifier.weight(1f))
-            fun move(step:Int) {val next=chosen.toMutableList();val to=index+step;if(to in next.indices) {java.util.Collections.swap(next,index,to);prefs.set("lyricsPriority",next.joinToString(",") {it.name})}}
-            TextButton({move(-1)},enabled=index>0) {Text("↑")};TextButton({move(1)},enabled=index<chosen.lastIndex) {Text("↓")}
-        }}
-    }
+
+    LyricsProviderOrder()
     ContentSettingsPane(stores.content)
 }
 
@@ -510,111 +495,86 @@ internal fun SettingsSearchField(value: String, onSubmit: () -> Unit = {}, onVal
 
 @Composable private fun DataPane(stores:SettingsStores) {
     val content by stores.content.settingsFlow.collectAsState(ContentSettings()); val scope=rememberCoroutineScope()
-    var proxy by remember {mutableStateOf(content.proxyUrl)}
+    var proxy by remember(content.proxyUrl) { mutableStateOf(content.proxyUrl) }
+    var proxyMessage by remember { mutableStateOf<String?>(null) }
     SettingsGroup("Network") {
-        SettingToggle("Use proxy", "New connections use this proxy",content.proxyEnabled) {scope.launch {stores.content.update {s->s.copy(proxyEnabled=it)}}}
-        SettingChoice("Proxy type",selected=content.proxyType.name,options=ProxyType.entries.map {it.name}) {scope.launch {stores.content.update {s->s.copy(proxyType=ProxyType.valueOf(it))}}}
-        OutlinedTextField(proxy,{proxy=it},Modifier.fillMaxWidth().reportTypingFocus(),label={Text(desktopText("Proxy host:port"))},singleLine=true)
-        var message by remember {mutableStateOf("")}
-        Button({if(com.auralis.music.data.network.ContentProxy.parseHostPort(proxy)!=null) scope.launch {stores.content.update {it.copy(proxyUrl=proxy)};message="Proxy saved."} else message="Enter a valid host and port."}) {Text(desktopText("Save proxy"))}
-        Text(desktopText(message),style=MaterialTheme.typography.bodySmall)
+        SettingToggle("Use proxy", "New connections use this proxy", content.proxyEnabled) { scope.launch { stores.content.update { s -> s.copy(proxyEnabled = it) } } }
+        SettingChoice("Proxy type", selected = content.proxyType.name, options = ProxyType.entries.map { it.name }) { scope.launch { stores.content.update { s -> s.copy(proxyType = ProxyType.valueOf(it)) } } }
+        // The address and its Save share one card, like the rows above.
+        DataCard {
+            Column(Modifier.weight(1f).padding(end = 16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(desktopText("Proxy address"), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(Color.White.copy(alpha = .06f))
+                    .border(1.dp, Color.White.copy(alpha = .10f), RoundedCornerShape(10.dp)).padding(horizontal = 12.dp, vertical = 10.dp)) {
+                    if (proxy.isEmpty()) Text("host:port", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .7f))
+                    BasicTextField(proxy, { proxy = it; proxyMessage = null }, Modifier.fillMaxWidth().reportTypingFocus(), singleLine = true,
+                        textStyle = MaterialTheme.typography.bodyMedium.copy(color = MaterialTheme.colorScheme.onSurface),
+                        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary))
+                }
+                proxyMessage?.let { Text(desktopText(it), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
+            }
+            OutlinedButton({
+                if (com.auralis.music.data.network.ContentProxy.parseHostPort(proxy) != null) {
+                    scope.launch { stores.content.update { it.copy(proxyUrl = proxy) }; proxyMessage = "Proxy saved." }
+                } else proxyMessage = "Enter a valid host and port."
+            }) { Text(desktopText("Save")) }
+        }
     }
     val downloads=com.auralis.music.desktop.library.DesktopDownloads.instance; val root by downloads.rootDirectory.collectAsState()
+    var folderMessage by remember { mutableStateOf<String?>(null) }
     SettingsGroup("Downloads") {
-        Text(root.absolutePath);TextButton({java.awt.Desktop.getDesktop().open(root)}) {Text(desktopText("Open download folder"))}
-        var message by remember {mutableStateOf("")}
-        TextButton({scope.launch {runCatching {
-            com.auralis.music.windows.library.NativeFolderPicker.chooseFolder(root)?.let {
-                withContext(Dispatchers.IO) { downloads.changeDirectory(it,false) }
-                message="Download location saved. Existing files stay available at their current locations."
+        DataCard {
+            DataIcon(Icons.Outlined.FolderOpen)
+            Column(Modifier.weight(1f).padding(horizontal = 14.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(desktopText("Download folder"), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                Text(root.absolutePath, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                folderMessage?.let { Text(desktopText(it), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
             }
-        }.onFailure {message=it.message.orEmpty()}}}) {Text(desktopText("Change folder"))}
-        Text(desktopText(message),style=MaterialTheme.typography.bodySmall)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton({ runCatching { java.awt.Desktop.getDesktop().open(root) } }) { Text(desktopText("Open")) }
+                OutlinedButton({ scope.launch { runCatching {
+                    com.auralis.music.windows.library.NativeFolderPicker.chooseFolder(root)?.let {
+                        withContext(Dispatchers.IO) { downloads.changeDirectory(it, false) }
+                        folderMessage = "Download location saved. Existing files stay available at their current locations."
+                    }
+                }.onFailure { folderMessage = it.message.orEmpty() } } }) { Text(desktopText("Change")) }
+            }
+        }
     }
     SettingsGroup("Caches") {
-        var refresh by remember {mutableStateOf(0)}; var message by remember {mutableStateOf("")}
+        var refresh by remember { mutableStateOf(0) }; var cacheMessage by remember { mutableStateOf<String?>(null) }
         val bytes by produceState<Long?>(null, refresh) {
             value = withContext(Dispatchers.IO) { DesktopCaches.imageBytes() + DesktopCaches.lyricsBytes() }
         }
-        Text(if (bytes == null) desktopText("Calculating cache size…") else
-            desktopText("Artwork and lyrics: %1\$s", com.auralis.music.util.formatBytes(bytes!!)))
-        Button({scope.launch {withContext(Dispatchers.IO) {DesktopCaches.clearImages();DesktopCaches.clearLyrics();com.auralis.music.desktop.playback.DesktopStreamResolver.clearCache()};refresh++;message="Caches cleared. Downloads and accounts are preserved."}}) {Text(desktopText("Clear caches"))}
-        Text(desktopText(message),style=MaterialTheme.typography.bodySmall)
-    }
-}
-
-@Composable private fun UpdatesPane() {
-    val scope = rememberCoroutineScope()
-    val version = DesktopReleaseCheck.version
-    val update by DesktopUpdater.state.collectAsState()
-    val latest by DesktopUpdater.latestRelease.collectAsState()
-    val restarting by DesktopUpdater.restarting.collectAsState()
-    var message by remember { mutableStateOf("") }
-    val bundledNotes = remember(version) {
-        DesktopReleaseCheck::class.java.getResourceAsStream("/desktop-release-notes-$version.txt")
-            ?.bufferedReader()?.use { it.readText().trim() }.orEmpty()
-    }
-
-    SettingsGroup("Updates") {
-        Text("${desktopText("Current version")} · $version")
-        val checking = update is DesktopUpdater.State.Checking
-        val download = update as? DesktopUpdater.State.Downloading
-        Button(onClick = {
-            message = ""
-            scope.launch { DesktopUpdater.check(manual = true) }
-        }, enabled = !checking && download == null && !restarting) {
-            Text(desktopText(if (checking) "Checking…" else "Check for updates"))
-        }
-        val status = updateStatusText(update)
-        if (status.isNotEmpty()) Text(status)
-        if (download != null) {
-            LinearProgressIndicator(
-                { if (download.total > 0) download.bytes.toFloat() / download.total else 0f },
-                Modifier.fillMaxWidth().padding(vertical = 4.dp),
-            )
-        }
-        if (update is DesktopUpdater.State.Ready) {
-            Button({ scope.launch { message = DesktopUpdater.restartToUpdate().orEmpty() } }, enabled = !restarting) {
-                Text(desktopText(if (restarting) "Restarting…" else "Restart to update"))
+        DataCard {
+            DataIcon(Icons.Outlined.Storage)
+            Column(Modifier.weight(1f).padding(horizontal = 14.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(if (bytes == null) desktopText("Calculating cache size…") else com.auralis.music.util.formatBytes(bytes!!),
+                    style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                Text(desktopText(cacheMessage ?: "Artwork and lyrics; downloads and accounts are kept"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (cacheMessage != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
             }
-        }
-        if (message.isNotEmpty()) Text(message)
-    }
-    SettingsGroup("Release notes") {
-        val release = latest
-        val notesVersion = release?.displayVersion ?: version
-        val publishedNotes = remember(release) { DesktopReleases.plainNotes(release?.notes.orEmpty()) }
-        val notes = publishedNotes.ifBlank { bundledNotes.takeIf { notesVersion == version }.orEmpty() }
-        Text("Auralis · $notesVersion", fontWeight = FontWeight.SemiBold)
-        Text(notes.ifBlank { desktopText("No release notes for this version.") })
-        if (release != null) {
-            TextButton({ java.awt.Desktop.getDesktop().browse(java.net.URI(release.pageUrl)) }) {
-                Text(desktopText("View release and installers"))
-            }
+            OutlinedButton({ scope.launch {
+                withContext(Dispatchers.IO) { DesktopCaches.clearImages(); DesktopCaches.clearLyrics(); com.auralis.music.desktop.playback.DesktopStreamResolver.clearCache() }
+                refresh++; cacheMessage = "Caches cleared. Downloads and accounts are preserved."
+            } }, enabled = (bytes ?: 0L) > 0L) { Text(desktopText("Clear caches")) }
         }
     }
 }
 
-@Composable private fun AboutPane() {
-    val scope = rememberCoroutineScope()
-    var message by remember { mutableStateOf("") }
-    Text("Auralis · ${DesktopReleaseCheck.version}",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.Bold)
-    Text(desktopText(if (isMac) "Auralis for macOS · Compose Multiplatform · VLC" else "Auralis for Windows · Compose Multiplatform · VLC"))
-    SettingsGroup("Credits") {
-        TextButton({ java.awt.Desktop.getDesktop().browse(java.net.URI("https://github.com/Spikerko/spicy-lyrics")) }) {
-            Text(desktopText("Animation inspired by Spicy Lyrics"))
-        }
-        Text(desktopText("Lyrics providers and community contributors are credited alongside the lyrics they supply."),
-            color = MaterialTheme.colorScheme.onSurfaceVariant)
+/** One settings card holding a row of content, the same surface as the toggle and choice rows. */
+@Composable private fun DataCard(content: @Composable RowScope.() -> Unit) {
+    Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainer, modifier = Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 68.dp).padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically, content = content)
     }
-    SettingsGroup("Support & diagnostics") {
-        TextButton({java.awt.Desktop.getDesktop().browse(java.net.URI(DesktopReleaseCheck.REPOSITORY))}) {Text(desktopText("Source code and licenses"))}
-        TextButton({java.awt.Desktop.getDesktop().browse(java.net.URI(DesktopReleaseCheck.REPOSITORY+"/issues/new"))}) {Text(desktopText("Report a problem"))}
-        val clipboard=androidx.compose.ui.platform.LocalClipboardManager.current
-        TextButton({clipboard.setText(androidx.compose.ui.text.AnnotatedString(DesktopReleaseCheck.diagnostics()));message="Diagnostics copied. No tokens, cookies or account identifiers are included."}) {Text(desktopText("Copy diagnostics"))}
-        TextButton({scope.launch {runCatching {
-            com.auralis.music.ui.components.WindowsFilePicker.choose("Save diagnostics", save = true, filterName = "Text files", pattern = "*.txt", defaultName = "auralis-diagnostics.txt", defaultExtension = "txt")?.let { it.writeText(DesktopReleaseCheck.diagnostics());message="Diagnostics saved."}
-        }.onFailure {message=it.message.orEmpty()}}}) {Text(desktopText("Save diagnostics"))}
-        if (message.isNotEmpty()) Text(desktopText(message))
+}
+
+@Composable private fun DataIcon(icon: ImageVector) {
+    Box(Modifier.size(38.dp).clip(RoundedCornerShape(10.dp)).background(MaterialTheme.colorScheme.primary.copy(alpha = .14f)),
+        contentAlignment = Alignment.Center) {
+        Icon(icon, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
     }
 }

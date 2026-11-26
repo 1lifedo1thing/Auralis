@@ -1062,41 +1062,59 @@ fun ClassicCompactPlaybackControls(
                 }
             }
 
+            val previousTap = rememberTransportTapAnimation()
+            val playTap = rememberTransportTapAnimation()
+            val nextTap = rememberTransportTapAnimation()
+
             // Previous (64dp target, bold rounded double triangle)
-            IconButton(
-                onClick = onPreviousClick,
+            TransportButton(
+                onClick = { previousTap.play(); onPreviousClick() },
                 modifier = Modifier
                     .size(64.dp)
                     .tactileBounce(scaleDown = 0.85f)
+                    .transportTapHighlight({ previousTap.progress.value })
                     .semantics { contentDescription = str(R.string.previous) }
             ) {
-                ClassicSkipGlyph(forward = false, color = Color.White, modifier = Modifier.size(width = 46.dp, height = 28.dp))
+                ClassicSkipGlyph(
+                    forward = false,
+                    color = Color.White,
+                    modifier = Modifier.size(width = 46.dp, height = 28.dp),
+                    skipProgress = { previousTap.progress.value }
+                )
             }
 
             // Play / Pause (76dp target)
-            IconButton(
-                onClick = onPlayPauseClick,
+            TransportButton(
+                onClick = { playTap.play(); onPlayPauseClick() },
                 modifier = Modifier
                     .size(76.dp)
                     .tactileBounce(scaleDown = 0.88f)
+                    .transportTapHighlight({ playTap.progress.value })
                     .semantics { contentDescription = if (uiState.isPlaying) str(R.string.pause) else str(R.string.play) }
             ) {
-                if (uiState.isPlaying) {
-                    ClassicPauseGlyph(color = Color.White, modifier = Modifier.size(width = 34.dp, height = 36.dp))
-                } else {
-                    ClassicPlayGlyph(color = Color.White, modifier = Modifier.size(width = 36.dp, height = 38.dp))
-                }
+                ClassicPlayPauseGlyph(
+                    isPlaying = uiState.isPlaying,
+                    color = Color.White,
+                    pauseModifier = Modifier.size(width = 34.dp, height = 36.dp),
+                    playModifier = Modifier.size(width = 36.dp, height = 38.dp)
+                )
             }
 
             // Next (64dp target)
-            IconButton(
-                onClick = onNextClick,
+            TransportButton(
+                onClick = { nextTap.play(); onNextClick() },
                 modifier = Modifier
                     .size(64.dp)
                     .tactileBounce(scaleDown = 0.85f)
+                    .transportTapHighlight({ nextTap.progress.value })
                     .semantics { contentDescription = str(R.string.next) }
             ) {
-                ClassicSkipGlyph(forward = true, color = Color.White, modifier = Modifier.size(width = 46.dp, height = 28.dp))
+                ClassicSkipGlyph(
+                    forward = true,
+                    color = Color.White,
+                    modifier = Modifier.size(width = 46.dp, height = 28.dp),
+                    skipProgress = { nextTap.progress.value }
+                )
             }
 
             if (showTransportPills && onToggleRepeat != null) {
@@ -2612,10 +2630,22 @@ internal fun ClassicQueueContent(
     modifier: Modifier = Modifier,
     queueListState: androidx.compose.foundation.lazy.LazyListState = rememberLazyListState(),
     contentLayer: androidx.compose.ui.graphics.GraphicsLayerScope.() -> Unit = {},
-    controlsBottomSpacerDp: androidx.compose.ui.unit.Dp = 0.dp
+    controlsBottomSpacerDp: androidx.compose.ui.unit.Dp = 0.dp,
+    /**
+     * The host's own controls state, when it shows or hides them itself (Immersive). Keeps this
+     * queue's idea of "hidden" in step, so the next scroll down always hides them.
+     */
+    hostControlsShown: Boolean? = null
 ) {
     var queueLocked by rememberSaveable { mutableStateOf(true) }
     var queueControlsVisible by remember { mutableStateOf(true) }
+    // The scroll handler below is remembered once. A host that composes the queue ahead of time
+    // (Immersive, on the Player tab) would otherwise be called through its first, stale callback,
+    // which still thought the queue was closed and dropped every hide.
+    val notifyControlsVisibility by rememberUpdatedState(onQueueControlsVisibilityChange)
+    LaunchedEffect(hostControlsShown) {
+        if (hostControlsShown != null) queueControlsVisible = hostControlsShown
+    }
     val queueContext = LocalContext.current
 
     // Tapping a song re-shows the controls, but not on the tap frame: that frame and the next few
@@ -2630,7 +2660,7 @@ internal fun ClassicQueueContent(
         pendingRevealTrackId = null
         if (!queueControlsVisible) {
             queueControlsVisible = true
-            onQueueControlsVisibilityChange(true)
+            notifyControlsVisibility(true)
         }
     }
 
@@ -2639,7 +2669,7 @@ internal fun ClassicQueueContent(
             .collect { (index, offset) ->
                 if (index == 0 && offset == 0 && !queueControlsVisible) {
                     queueControlsVisible = true
-                    onQueueControlsVisibilityChange(true)
+                    notifyControlsVisibility(true)
                 }
             }
     }
@@ -2937,7 +2967,7 @@ internal fun ClassicQueueContent(
                         .collect { isAtTop ->
                             if (isAtTop && !queueControlsVisible) {
                                 queueControlsVisible = true
-                                onQueueControlsVisibilityChange(true)
+                                notifyControlsVisibility(true)
                             }
                         }
                 }
@@ -2953,10 +2983,10 @@ internal fun ClassicQueueContent(
                             val delta = available.y
                             if (delta < -2f && queueControlsVisible) {
                                 queueControlsVisible = false
-                                onQueueControlsVisibilityChange(false)
+                                notifyControlsVisibility(false)
                             } else if (delta > 2f && !queueControlsVisible) {
                                 queueControlsVisible = true
-                                onQueueControlsVisibilityChange(true)
+                                notifyControlsVisibility(true)
                             }
                             return Offset.Zero
                         }
@@ -2969,7 +2999,7 @@ internal fun ClassicQueueContent(
                             if (reorderableLazyListState.isAnyItemDragging) return Offset.Zero
                             if (available.y > 2f && !queueControlsVisible) {
                                 queueControlsVisible = true
-                                onQueueControlsVisibilityChange(true)
+                                notifyControlsVisibility(true)
                             }
                             return Offset.Zero
                         }
@@ -3025,6 +3055,15 @@ internal fun ClassicQueueContent(
                                         com.auralis.music.ui.components.AppPillManager.showPill(
                                             str(if (from == to) R.string.already_playing_next_x else R.string.playing_next_x, item.title)
                                         )
+                                    }
+                                } else null,
+                                // Swipe left: the song goes to the end of the queue (it is already in it).
+                                onAddToQueue = if (swipeEnabled && onReorderQueue != null) {
+                                    {
+                                        val from = queuePosition()
+                                        val to = queueSnapshot.lastIndex
+                                        if (from >= 0 && to >= 0 && from != to) onReorderQueue(from, to)
+                                        com.auralis.music.ui.components.AppPillManager.showPill(str(R.string.added_to_queue_x, item.title))
                                     }
                                 } else null,
                                 onRemoveFromPlaylist = if (swipeEnabled && onRemoveQueueItem != null) {
@@ -3404,7 +3443,7 @@ private fun openAudioOutputSettings(context: Context) {
 
 /** Section title row in the classic Queue ("History", "Continue Playing"). */
 @Composable
-private fun ClassicQueueSectionHeader(
+internal fun ClassicQueueSectionHeader(
     title: String,
     modifier: Modifier = Modifier,
     subtitle: String? = null,

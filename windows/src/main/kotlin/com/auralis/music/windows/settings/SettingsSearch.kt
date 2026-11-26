@@ -116,18 +116,11 @@ internal val settingEntries: List<SettingEntry> = buildList {
             row("Prevent duplicates", "Do not add the same song twice to the upcoming queue")
             row("Shuffle whole queue", "When shuffling, include earlier songs while retaining the current track")
         }
-        group("Video") {
-            row("Music videos", "Show a synchronized video in the sidebar when the playing recording has one. Audio continues independently.")
-            row("Ambient light", "Sample the video colours for the sidebar background")
+        group("Search") {
             row("Hide music videos in search", "Show audio recordings instead of video results on your next search")
         }
-        group("Advanced · stream clients") {
-            row("VISIONOS", keywords = "stream client extractor")
-            row("IOS", keywords = "stream client extractor")
-        }
-        group("Lyrics source order") {
-            row("Spicy Lyrics key override (optional)", "Works automatically with Auralis's included publishable key", "spicy api token key")
-            row("Use custom source priority", "Try enabled sources in this order before automatic fallback. Applies to newly fetched lyrics.", "providers")
+        group("Lyrics providers") {
+            row("Provider order", "Auralis asks providers from the top down. Drag a provider to change the order.", "lyrics sources priority reorder rearrange")
         }
     }
     tab(SettingsTab.HOTKEYS) {
@@ -162,18 +155,20 @@ internal val settingEntries: List<SettingEntry> = buildList {
         group("Caches") { other("Clear caches", "Artwork and lyrics; downloads and accounts are kept", "storage space") }
     }
     tab(SettingsTab.UPDATES) {
-        group("Updates") {
-            other("Check for updates", keywords = "version upgrade")
+        group("Current version") { other("Check for updates", keywords = "version upgrade") }
+        group("Update settings") {
+            row("Automatically check for updates", "Once a day while Auralis is open", "auto daily")
+            row("Enable update notifications", "A card in the corner when an update is ready", "prompt popup")
         }
-        group("Release notes") { other("Release notes", keywords = "patch notes changelog") }
+        group("Changelog") { other("Changelog", keywords = "release patch notes what's new") }
     }
     tab(SettingsTab.ABOUT) {
-        group("Support & diagnostics") {
-            other("Source code and licenses")
-            other("Report a problem", keywords = "bug issue")
-            other("Copy diagnostics", keywords = "logs")
-            other("Save diagnostics", keywords = "logs export")
+        group("Lead Developer") {
+            other("Copy diagnostic report", keywords = "logs diagnostics support")
+            other("Buy Me a Chai", keywords = "donate support")
         }
+        group("Contributors") { other("Contributors", keywords = "credits team github") }
+        group("Credits") { other("Animation inspired by Spicy Lyrics", keywords = "credits licenses") }
     }
     tab(SettingsTab.CONTENT) {
         group("Content country & language") {
@@ -182,9 +177,6 @@ internal val settingEntries: List<SettingEntry> = buildList {
             row("Show artist subscriber count", "Displays channel subscribers on artist pages")
             row("Show monthly listeners", "Displays estimated monthly listeners on artist pages")
             row("Show artist description", "Displays Wikipedia and bio descriptions on artist pages")
-        }
-        group("Lyrics providers") {
-            other("Lyrics providers", "Active providers are queried in priority order for synchronous and word-timed lyrics.", "sources")
         }
         group("Lyrics romanization") {
             row("Romanize lyrics", "Show pronunciation below supported lyrics", "romanisation pronunciation latin")

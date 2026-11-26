@@ -89,7 +89,10 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.PointerEventType
@@ -235,21 +238,11 @@ internal fun ImmersiveScreen(
                     AnimatedContent(
                         targetState = shown,
                         transitionSpec = {
-                            if (targetState == ImmersiveView.LYRICS) {
-                                (fadeIn(animationSpec = tween(320, easing = FastOutSlowInEasing)) +
-                                    slideInHorizontally(animationSpec = tween(320, easing = FastOutSlowInEasing)) { it / 8 })
-                                    .togetherWith(
-                                        fadeOut(animationSpec = tween(220, easing = FastOutSlowInEasing)) +
-                                            slideOutHorizontally(animationSpec = tween(220, easing = FastOutSlowInEasing)) { -it / 8 }
-                                    )
-                            } else {
-                                (fadeIn(animationSpec = tween(320, easing = FastOutSlowInEasing)) +
-                                    slideInHorizontally(animationSpec = tween(320, easing = FastOutSlowInEasing)) { -it / 8 })
-                                    .togetherWith(
-                                        fadeOut(animationSpec = tween(220, easing = FastOutSlowInEasing)) +
-                                            slideOutHorizontally(animationSpec = tween(220, easing = FastOutSlowInEasing)) { it / 8 }
-                                    )
-                            }
+                            // One sideways move, like the bead in the switch: Lyrics sits to the right of Clock.
+                            val toRight = targetState == ImmersiveView.LYRICS
+                            val slide = tween<IntOffset>(420, easing = FastOutSlowInEasing)
+                            (slideInHorizontally(slide) { if (toRight) it else -it } + fadeIn(tween(260, delayMillis = 60)))
+                                .togetherWith(slideOutHorizontally(slide) { if (toRight) -it else it } + fadeOut(tween(200)))
                         },
                         modifier = Modifier.weight(1f).fillMaxWidth(),
                         label = "ImmersiveViewSwitch"
@@ -266,34 +259,8 @@ internal fun ImmersiveScreen(
                             track, view, onView, playback, displays, shownDisplays, thisDisplay, onToggleDisplay, onLeave,
                             Modifier.padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 16.dp)
                                 .hoverable(dockInteraction),
-                            dockTrack = track?.takeIf { shown == ImmersiveView.CLOCK },
                             artwork = highRes
                         )
-                    }
-                }
-                AnimatedVisibility(
-                    visible = shown == ImmersiveView.LYRICS && track != null,
-                    enter = fadeIn(tween(300, easing = FastOutSlowInEasing)) +
-                        slideInVertically(tween(300, easing = FastOutSlowInEasing)) { it / 3 },
-                    exit = fadeOut(tween(200, easing = FastOutSlowInEasing)) +
-                        slideOutVertically(tween(200, easing = FastOutSlowInEasing)) { it / 3 },
-                    modifier = Modifier.align(Alignment.BottomStart)
-                ) {
-                    if (track != null) {
-                        Row(
-                            Modifier.padding(start = 24.dp, bottom = 16.dp)
-                                .fillMaxWidth(.28f),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            DesktopArtwork(highRes, Modifier.size(52.dp), 8.dp, track.title)
-                            Column(Modifier.weight(1f)) {
-                                Text(track.title, fontSize = 16.sp, fontWeight = FontWeight.Bold,
-                                    color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text(track.artist, fontSize = 11.sp, color = Color.White.copy(alpha = .75f),
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            }
-                        }
                     }
                 }
             }
@@ -653,7 +620,7 @@ private fun TransportControls(playback: DesktopPlaybackController, emphasized: B
     Row(
         modifier,
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(if (emphasized) 6.dp else 16.dp, Alignment.CenterHorizontally)
+        horizontalArrangement = Arrangement.spacedBy(if (emphasized) 6.dp else 4.dp, Alignment.CenterHorizontally)
     ) {
         TransportButton(onClick = playback::previous, width = skipWidth) { hovered ->
             ClassicSkipGlyph(forward = false, color = Color.White.copy(alpha = if (hovered) 1f else .86f),
@@ -743,153 +710,105 @@ private fun LyricsView(playback: DesktopPlaybackController, lyrics: DesktopLyric
     }
 }
 
+/**
+ * The dock is one slim glass row, identical on both views so switching never moves it:
+ * cover, song and timeline, transport, then the Clock/Lyrics switch and close.
+ */
+/** The song's text column: long titles ellipsize instead of widening the dock. */
+private val DockTextWidth = 190.dp
+private val DockRadius = 26.dp
+private val DockInset = 10.dp
+private val DockControlHeight = 36.dp
+
+/**
+ * The phone's liquid glass, as its floating dock draws it (Android `liquidGlass` with `glassBarTint`):
+ * a 9% white tint, 8dp blur, a 24dp lens over at least 30% of the short side, no dispersion,
+ * vibrancy, the directional half-dp rim and Kyant's default shadow.
+ */
+private val PhoneGlassTint = Color.White.copy(alpha = .09f)
+/** The phone dock's selected tab: a solid 14% white bead with a faint 10% white edge. */
+private val PhoneIndicatorTint = Color.White.copy(alpha = .14f)
+private val PhoneIndicatorEdge = Color.White.copy(alpha = .10f)
+
 @Composable
 private fun ImmersiveControls(
     track: Track?, view: ImmersiveView, onView: (ImmersiveView) -> Unit, playback: DesktopPlaybackController,
     displays: List<ImmersiveDisplay>, shownDisplays: List<ImmersiveDisplay>, thisDisplay: ImmersiveDisplay,
-    onToggleDisplay: (Int) -> Unit, onLeave: () -> Unit, modifier: Modifier = Modifier,
-    dockTrack: Track? = null, artwork: String? = null
+    onToggleDisplay: (Int) -> Unit, onLeave: () -> Unit, modifier: Modifier = Modifier, artwork: String? = null
 ) {
-    val playing = rememberPlaying(playback)
-    LiquidPopupSurface(modifier, frosted = false) {
-        Column(
-            Modifier
-                .animateContentSize(tween(260, easing = FastOutSlowInEasing))
-                .padding(horizontal = 6.dp, vertical = 2.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
+    LiquidPopupSurface(
+        modifier, tint = PhoneGlassTint, cornerRadius = DockRadius,
+        blurDp = 8f, lensHeightDp = 24f, lensAmountDp = 24f, lensBand = .3f, chromaticAberration = 0f,
+        shadowElevation = 12.dp
+    ) {
+        Row(
+            Modifier.padding(start = DockInset, top = DockInset, bottom = DockInset, end = DockInset + 4.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            AnimatedVisibility(
-                visible = dockTrack != null,
-                enter = expandVertically(tween(260, easing = FastOutSlowInEasing)) + fadeIn(tween(200)),
-                exit = shrinkVertically(tween(220, easing = FastOutSlowInEasing)) + fadeOut(tween(160))
-            ) {
-                if (dockTrack != null) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        NowPlayingRow(dockTrack, artwork, playback)
-                        Spacer(Modifier.height(1.dp))
-                    }
+            if (track != null) {
+                // The box's corner minus its inset keeps the cover's corner concentric with the glass.
+                DesktopArtwork(artwork, Modifier.size(60.dp), DockRadius - DockInset, track.title, highRes = true)
+                Spacer(Modifier.width(14.dp))
+                // Shrinks on a narrow (portrait) display rather than pushing the controls off.
+                Column(Modifier.weight(1f, fill = false).widthIn(max = DockTextWidth)) {
+                    Text(track.title, fontSize = 16.sp, lineHeight = 20.sp, fontWeight = FontWeight.Bold, color = Color.White,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(track.artist, fontSize = 12.sp, lineHeight = 15.sp, color = Color.White.copy(alpha = .7f),
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Spacer(Modifier.height(4.dp))
+                    ImmersiveProgress(playback, track, Modifier.fillMaxWidth())
                 }
+                Spacer(Modifier.width(8.dp))
+                TransportControls(playback, emphasized = false)
+                Spacer(Modifier.width(8.dp))
+                Box(Modifier.width(1.dp).height(28.dp).background(Color.White.copy(alpha = .14f)))
+                Spacer(Modifier.width(8.dp))
             }
-            AnimatedVisibility(
-                visible = track != null && dockTrack == null,
-                enter = expandVertically(tween(260, easing = FastOutSlowInEasing)) + fadeIn(tween(200)),
-                exit = shrinkVertically(tween(220, easing = FastOutSlowInEasing)) + fadeOut(tween(160))
-            ) {
-                TransportControls(playback, emphasized = false, Modifier.padding(vertical = 1.dp))
-            }
-            LiquidGlassBar(
-                Modifier
-                    .width(DockWidth)
-                    .padding(horizontal = 4.dp, vertical = 2.dp)
-            )
-            ImmersiveTabBar(
-                selectedView = view,
-                onSelectView = onView,
-                onLeave = onLeave,
-                modifier = Modifier.width(DockWidth)
-            )
+            ImmersiveViewSwitch(view, onView)
             if (displays.size > 1) {
-                Row(
-                    Modifier.horizontalScroll(rememberScrollState()).padding(top = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(3.dp)
-                ) {
+                Spacer(Modifier.width(6.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                     displays.forEachIndexed { index, display ->
-                        val on = display in shownDisplays
-                        Surface(
+                        DockCircleButton(
                             onClick = { onToggleDisplay(index) },
-                            shape = CircleShape,
-                            color = if (on) Color.White.copy(alpha = .20f) else Color.Transparent,
-                            contentColor = if (on) Color.White else Color.White.copy(alpha = .55f)
-                        ) {
-                            Box(Modifier.size(30.dp), contentAlignment = Alignment.Center) {
-                                Text(
-                                    "${index + 1}",
-                                    fontSize = 12.sp,
-                                    fontWeight = if (display == thisDisplay) FontWeight.Bold else FontWeight.Normal
-                                )
-                            }
+                            selected = display in shownDisplays,
+                            size = DockControlHeight
+                        ) { alpha ->
+                            Text("${index + 1}", fontSize = 12.sp, color = Color.White.copy(alpha = alpha),
+                                fontWeight = if (display == thisDisplay) FontWeight.Bold else FontWeight.Normal)
                         }
                     }
                 }
+            }
+            Spacer(Modifier.width(6.dp))
+            DockCircleButton(onClick = onLeave, selected = false, size = DockControlHeight, description = desktopText("Close")) { alpha ->
+                Icon(Icons.Rounded.Close, contentDescription = null, modifier = Modifier.size(18.dp),
+                    tint = Color.White.copy(alpha = alpha))
             }
         }
     }
 }
 
+/** Clock / Lyrics like the phone dock's tabs: the selected one sits on a bead that glides between them. */
 @Composable
-private fun LiquidGlassBar(modifier: Modifier = Modifier) {
-    Box(
-        modifier
-            .height(1.dp)
-            .background(
-                Brush.horizontalGradient(
-                    0.0f to Color.White.copy(alpha = 0.02f),
-                    0.20f to Color.White.copy(alpha = 0.18f),
-                    0.50f to Color.White.copy(alpha = 0.30f),
-                    0.80f to Color.White.copy(alpha = 0.18f),
-                    1.0f to Color.White.copy(alpha = 0.02f)
-                )
-            )
+private fun ImmersiveViewSwitch(selected: ImmersiveView, onSelect: (ImmersiveView) -> Unit) {
+    val segment = 82.dp
+    val index by animateFloatAsState(
+        ImmersiveView.entries.indexOf(selected).toFloat(),
+        spring(dampingRatio = Spring.DampingRatioLowBouncy, stiffness = Spring.StiffnessMediumLow),
+        label = "view_switch_bead"
     )
-}
-
-@Composable
-private fun ImmersiveTabBar(
-    selectedView: ImmersiveView,
-    onSelectView: (ImmersiveView) -> Unit,
-    onLeave: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val selectedIndex = if (selectedView == ImmersiveView.CLOCK) 0 else 1
-    val animatedIndex by animateFloatAsState(
-        targetValue = selectedIndex.toFloat(),
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioLowBouncy,
-            stiffness = Spring.StiffnessMediumLow
-        ),
-        label = "tab_pill_offset"
-    )
-
-    BoxWithConstraints(modifier.selectableGroup(), contentAlignment = Alignment.CenterStart) {
-        val tabWidth = maxWidth / 3
-        val tabHeight = 30.dp
-
-        // Smooth sliding liquid glass highlight pill behind the active tab (exact GlassDock recipe)
+    Box(Modifier.width(segment * ImmersiveView.entries.size).height(DockControlHeight).selectableGroup()) {
         Box(
             Modifier
-                .offset { IntOffset(x = (animatedIndex * tabWidth.toPx()).roundToInt(), y = 0) }
-                .width(tabWidth)
-                .height(tabHeight)
-                .padding(horizontal = 4.dp, vertical = 2.dp)
+                .offset { IntOffset((index * segment.toPx()).roundToInt(), 0) }
+                .width(segment)
+                .height(DockControlHeight)
                 .drawBehind {
                     val stroke = 1.dp.toPx()
-                    val radius = CornerRadius(size.height / 2f)
-                    // GlassDock pill fill
+                    drawRoundRect(PhoneIndicatorTint, cornerRadius = CornerRadius(size.height / 2f))
                     drawRoundRect(
-                        brush = Brush.verticalGradient(
-                            listOf(
-                                Color.White.copy(alpha = 0.16f),
-                                Color.White.copy(alpha = 0.06f)
-                            )
-                        ),
-                        cornerRadius = radius
-                    )
-                    // Specular top sheen
-                    drawRoundRect(
-                        brush = Brush.verticalGradient(
-                            0f to Color.White.copy(alpha = 0.08f),
-                            0.45f to Color.Transparent
-                        ),
-                        cornerRadius = radius
-                    )
-                    // GlassDock specular rim
-                    drawRoundRect(
-                        brush = Brush.verticalGradient(
-                            listOf(
-                                Color.White.copy(alpha = 0.22f),
-                                Color.White.copy(alpha = 0.06f)
-                            )
-                        ),
+                        PhoneIndicatorEdge,
                         topLeft = Offset(stroke / 2f, stroke / 2f),
                         size = Size(size.width - stroke, size.height - stroke),
                         cornerRadius = CornerRadius(size.height / 2f - stroke / 2f),
@@ -897,144 +816,56 @@ private fun ImmersiveTabBar(
                     )
                 }
         )
-
-        // The 3 tabs in a Row over the sliding pill
-        Row(
-            Modifier.fillMaxWidth().height(tabHeight),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
+        Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
             ImmersiveView.entries.forEach { option ->
-                val isSelected = option == selectedView
-                val interactionSource = remember { MutableInteractionSource() }
-                val isHovered by interactionSource.collectIsHoveredAsState()
-                val isPressed by interactionSource.collectIsPressedAsState()
-
-                val textAlpha by animateFloatAsState(
-                    targetValue = if (isSelected) 1f else if (isHovered) 0.90f else 0.65f,
-                    animationSpec = tween(140),
-                    label = "tab_text_alpha_${option.name}"
-                )
-                val hoverAlpha by animateFloatAsState(
-                    targetValue = if (!isSelected && isHovered) 0.07f else 0f,
-                    animationSpec = tween(120),
-                    label = "tab_hover_${option.name}"
-                )
-                val scale by animateFloatAsState(
-                    targetValue = if (isPressed) 0.96f else 1.0f,
-                    animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
-                    label = "tab_scale_${option.name}"
-                )
-
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(tabHeight)
-                        .padding(horizontal = 4.dp, vertical = 2.dp)
+                val isSelected = option == selected
+                val interaction = remember { MutableInteractionSource() }
+                val hovered by interaction.collectIsHoveredAsState()
+                val pressed by interaction.collectIsPressedAsState()
+                val alpha by animateFloatAsState(if (isSelected) 1f else if (hovered) .9f else .62f, tween(140))
+                val scale by animateFloatAsState(if (pressed) .95f else 1f, spring(stiffness = Spring.StiffnessMediumLow))
+                Row(
+                    Modifier
+                        .width(segment)
+                        .fillMaxHeight()
                         .scale(scale)
                         .pointerHoverIcon(PointerIcon.Hand)
-                        .drawBehind {
-                            if (hoverAlpha > 0f) {
-                                drawRoundRect(
-                                    color = Color.White.copy(alpha = hoverAlpha),
-                                    cornerRadius = CornerRadius(size.height / 2f)
-                                )
-                            }
-                        }
-                        .selectable(
-                            selected = isSelected,
-                            interactionSource = interactionSource,
-                            indication = null,
-                            role = Role.Tab,
-                            onClick = { onSelectView(option) }
-                        ),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally)
-                    ) {
-                        val icon = if (option == ImmersiveView.CLOCK) Icons.Rounded.Schedule else Icons.AutoMirrored.Rounded.Subject
-                        Icon(
-                            icon,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp),
-                            tint = Color.White.copy(alpha = textAlpha)
-                        )
-                        Text(
-                            text = desktopText(option.label),
-                            fontSize = 12.sp,
-                            lineHeight = 14.sp,
-                            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
-                            color = Color.White.copy(alpha = textAlpha),
-                            maxLines = 1
-                        )
-                    }
-                }
-            }
-
-            // Close tab / button
-            val closeInteractionSource = remember { MutableInteractionSource() }
-            val closeHovered by closeInteractionSource.collectIsHoveredAsState()
-            val closePressed by closeInteractionSource.collectIsPressedAsState()
-            val closeHoverAlpha by animateFloatAsState(
-                targetValue = if (closeHovered) 0.08f else 0f,
-                animationSpec = tween(120),
-                label = "close_hover"
-            )
-            val closeScale by animateFloatAsState(
-                targetValue = if (closePressed) 0.96f else 1.0f,
-                animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
-                label = "close_scale"
-            )
-            val closeTextAlpha by animateFloatAsState(
-                targetValue = if (closeHovered) 1f else 0.65f,
-                animationSpec = tween(140),
-                label = "close_alpha"
-            )
-
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .height(tabHeight)
-                    .padding(horizontal = 4.dp, vertical = 2.dp)
-                    .scale(closeScale)
-                    .pointerHoverIcon(PointerIcon.Hand)
-                    .drawBehind {
-                        if (closeHoverAlpha > 0f) {
-                            drawRoundRect(
-                                color = Color.White.copy(alpha = closeHoverAlpha),
-                                cornerRadius = CornerRadius(size.height / 2f)
-                            )
-                        }
-                    }
-                    .clickable(
-                        interactionSource = closeInteractionSource,
-                        indication = null,
-                        role = Role.Button,
-                        onClick = onLeave
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                Row(
+                        .selectable(isSelected, interactionSource = interaction, indication = null, role = Role.Tab,
+                            onClick = { onSelect(option) }),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally)
                 ) {
-                    Icon(
-                        Icons.Rounded.Close,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp),
-                        tint = Color.White.copy(alpha = closeTextAlpha)
-                    )
-                    Text(
-                        text = desktopText("Close"),
-                        fontSize = 12.sp,
-                        lineHeight = 14.sp,
-                        fontWeight = if (closeHovered) FontWeight.SemiBold else FontWeight.Normal,
-                        color = Color.White.copy(alpha = closeTextAlpha),
-                        maxLines = 1
-                    )
+                    val icon = if (option == ImmersiveView.CLOCK) Icons.Rounded.Schedule else Icons.AutoMirrored.Rounded.Subject
+                    Icon(icon, contentDescription = null, modifier = Modifier.size(15.dp), tint = Color.White.copy(alpha = alpha))
+                    Text(desktopText(option.label), fontSize = 12.sp, lineHeight = 14.sp, maxLines = 1,
+                        fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
+                        color = Color.White.copy(alpha = alpha))
                 }
             }
         }
     }
+}
+
+/** A round button on the glass: the phone's indicator bead when [selected], a fainter one on hover. */
+@Composable
+private fun DockCircleButton(
+    onClick: () -> Unit, selected: Boolean, size: Dp, description: String? = null,
+    content: @Composable (alpha: Float) -> Unit
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+    val pressed by interaction.collectIsPressedAsState()
+    val fill by animateFloatAsState(if (selected) .14f else if (hovered) .10f else 0f, tween(120))
+    val alpha by animateFloatAsState(if (selected || hovered) 1f else .72f, tween(140))
+    val scale by animateFloatAsState(if (pressed) .9f else 1f, spring(stiffness = Spring.StiffnessMediumLow))
+    Box(
+        Modifier
+            .size(size)
+            .scale(scale)
+            .drawBehind { if (fill > 0f) drawCircle(Color.White.copy(alpha = fill)) }
+            .pointerHoverIcon(PointerIcon.Hand)
+            .clickable(interactionSource = interaction, indication = null, role = Role.Button, onClick = onClick)
+            .then(if (description != null) Modifier.semantics { contentDescription = description } else Modifier),
+        contentAlignment = Alignment.Center
+    ) { content(alpha) }
 }
