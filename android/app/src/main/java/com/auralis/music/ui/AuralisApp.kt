@@ -31,6 +31,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
@@ -332,6 +333,15 @@ fun AuralisApp(
     var isNowPlayingOpen by rememberSaveable { mutableStateOf(false) }
     // A restored open player starts open, not sliding up from the mini player.
     val playerSheetProgress = remember { Animatable(if (isNowPlayingOpen) 1f else 0f) }
+    // The Spotify Canvas starts only once the sheet is fully open, and stays until it is fully down.
+    // Measured on the release build: creating its video player and animating its blur inside the
+    // slide made nearly every opening frame miss its deadline (RenderThread 20-70 ms a frame).
+    var playerCanvasArmed by remember { mutableStateOf(isNowPlayingOpen) }
+    LaunchedEffect(playerSheetProgress) {
+        snapshotFlow { playerSheetProgress.value }.collect { p ->
+            if (p >= 0.999f) playerCanvasArmed = true else if (p <= 0f) playerCanvasArmed = false
+        }
+    }
     val classicPlayerSlide = inlineLyricsDesign == com.auralis.music.domain.model.PlayerDesign.OLD
     val immersivePlayerMorph = com.auralis.music.domain.model.PlayerDesign.fromDisplayName(appearanceSettings.playerDesign) ==
         com.auralis.music.domain.model.PlayerDesign.IMMERSIVE
@@ -886,9 +896,9 @@ fun AuralisApp(
     // The pages are recorded into glassBackdrop (over the app background, so the glass never
     // samples transparency); the dock and mini player render it as glass. Scrolling a page down
     // minimizes the dock and tucks the mini player into the dock row.
-    // Glass is built for dark pages: it turns off on light themes and returns with a dark one.
-    val glassEnabled = appearanceSettings.liquidGlass &&
-        androidx.compose.material3.MaterialTheme.colorScheme.background.luminance() < .5f
+    // Glass and Frost both work on light and dark themes; Frost swaps the lens for a flat veil.
+    val glassEnabled = appearanceSettings.liquidGlass
+    val frostEnabled = glassEnabled && appearanceSettings.frostGlass
     // "Liquid glass" as the mini-player background style: glass on the mini player only.
     val miniPlayerSurface = com.auralis.music.ui.player.MiniPlayerBackgrounds.surface(appearanceSettings)
     val miniPlayerGlass = miniPlayerSurface == com.auralis.music.ui.player.MiniPlayerBackgrounds.Surface.LIQUID_GLASS
@@ -944,8 +954,14 @@ fun AuralisApp(
     val anyGlassContext = remember(combinedGlassBackdrop, glassIsDark) {
         com.auralis.music.ui.glass.LiquidGlassContext(combinedGlassBackdrop, glassIsDark, dockCollapse)
     }
-    val glassContext = if (glassEnabled) anyGlassContext else null
-    // The selected mini-player background applies in both expanded and tucked forms.
+    // The app style: real glass, or the same recordings drawn as Frost.
+    val appGlassContext = remember(anyGlassContext, frostEnabled) {
+        if (frostEnabled) com.auralis.music.ui.glass.LiquidGlassContext(
+            combinedGlassBackdrop, glassIsDark, dockCollapse, frost = true) else anyGlassContext
+    }
+    val glassContext = if (glassEnabled) appGlassContext else null
+    // The selected mini-player background applies in both expanded and tucked forms; its own
+    // "Liquid glass" style stays real glass even when the app style is Frost.
     val miniGlassContext = if (miniPlayerGlass) anyGlassContext else null
     chromeCollapse[0] = dockCollapse
     LaunchedEffect(currentDestination, collapseOnScroll) { dockMinimize.expand() }
@@ -978,6 +994,25 @@ fun AuralisApp(
         }
     )
 
+    // The device-wide shuffle switch every Shuffle button reads (a remote Connect session's
+    // shuffle when this phone is controlling another device).
+    // Read only inside derivedStateOf, so a queue change doesn't recompose the app root.
+    val localQueueState = viewModelProvider.audioPlayer.queueState.collectAsState()
+    val connectRemote = com.auralis.music.data.connect.AuralisConnect.remote.collectAsState()
+    val shuffleOnState = remember(localQueueState, connectRemote) {
+        androidx.compose.runtime.derivedStateOf { connectRemote.value?.shuffle ?: localQueueState.value.isShuffled }
+    }
+    val shuffleControl = remember(viewModelProvider, shuffleOnState) {
+        com.auralis.music.ui.player.ShuffleControl(
+            state = shuffleOnState,
+            toggle = {
+                if (guestControlBlocked()) notifyGuestControlBlocked()
+                else viewModelProvider.audioPlayer.toggleShuffle()
+            },
+            turnOn = { if (!guestControlBlocked()) viewModelProvider.audioPlayer.setShuffle(true) }
+        )
+    }
+
     // One SharedTransitionLayout for the whole app: the mini-player lives in the
     // Scaffold's bottom bar and Now Playing is a sibling overlay, so the only way the
     // two can hand the artwork over is through a shared parent that outlives both.
@@ -988,6 +1023,7 @@ fun AuralisApp(
             .background(MaterialTheme.dynamicBackground)
     ) {
     CompositionLocalProvider(
+        com.auralis.music.ui.player.LocalShuffleControl provides shuffleControl,
         com.auralis.music.ui.player.LocalPlayerModalVisualState provides remember {
             com.auralis.music.ui.player.PlayerModalVisualState()
         },
@@ -1184,9 +1220,9 @@ fun AuralisApp(
                         val tabHeaderBackdrop = com.kyant.backdrop.backdrops.rememberLayerBackdrop(
                             onDraw = glassBackdropDraw
                         )
-                        val tabHeaderGlass = remember(tabHeaderBackdrop, glassIsDark) {
+                        val tabHeaderGlass = remember(tabHeaderBackdrop, glassIsDark, frostEnabled) {
                             com.auralis.music.ui.glass.LiquidGlassContext(
-                                tabHeaderBackdrop, glassIsDark, dockCollapse
+                                tabHeaderBackdrop, glassIsDark, dockCollapse, frost = frostEnabled
                             )
                         }
 
@@ -1225,10 +1261,14 @@ fun AuralisApp(
                             if (visitedDestinations.contains(destination)) {
                                 val isCurrentlyActive = destination == activeDestination
                                 val wasPrevious = destination == previousDestination
+                                val pageOnScreen = remember(isCurrentlyActive, wasPrevious, reducedMotion) {
+                                    derivedStateOf {
+                                        isCurrentlyActive || (!reducedMotion && wasPrevious && transitionProgress.value < 1f)
+                                    }
+                                }
 
-                                // Keep all 3 primary destinations continuously composed in memory to preserve scroll
-                                // positions, carousel state, and search queries without rebuild or image reload overhead.
-                                // Inactive destinations have alpha = 0f (RenderNode skip-draw) and swallow pointer events.
+                                // Keep scroll and query state without drawing or hit-testing tabs
+                                // that are no longer part of the transition.
                                 Box(
                                     modifier = Modifier
                                         .fillMaxSize()
@@ -1236,6 +1276,14 @@ fun AuralisApp(
                                         // Pages can then draw artwork above their safe content slot.
                                         .underStatusBar()
                                         .zIndex(if (isCurrentlyActive) 10f else 0f)
+                                        .layout { measurable, constraints ->
+                                            val page = measurable.measure(constraints)
+                                            layout(page.width, page.height) {
+                                                // Keep placement consistent with Compose lookahead.
+                                                page.placeRelative(0, if (pageOnScreen.value) 0 else page.height)
+                                            }
+                                        }
+                                        .drawWithContent { if (pageOnScreen.value) drawContent() }
                                         .graphicsLayer {
                                             // Read the clock in the layer phase, not composition:
                                             // shelves and lists stay out of every animation frame.
@@ -1268,6 +1316,9 @@ fun AuralisApp(
                                             } else Modifier
                                         )
                                 ) {
+                                    androidx.compose.runtime.CompositionLocalProvider(
+                                        com.auralis.music.ui.theme.LocalPreviewMotionActive provides pageOnScreen.value
+                                    ) {
                                     when (destination) {
                                         AppDestination.HOME -> {
                                             HomeScreen(
@@ -1375,8 +1426,7 @@ fun AuralisApp(
                                                     coroutineScope.launch {
                                                         val tracks = obtainSearchViewModel().getAlbumTracks(album)
                                                         if (tracks.isNotEmpty()) {
-                                                            val shuffled = tracks.shuffled()
-                                                            obtainPlayerViewModel().playTrack(shuffled.first(), shuffled, 0)
+                                                            shuffleControl.shufflePlay(tracks) { first, list -> obtainPlayerViewModel().playTrack(first, list, list.indexOf(first)) }
                                                             android.widget.Toast.makeText(context, str(R.string.shuffling_x, album.title), android.widget.Toast.LENGTH_SHORT).show()
                                                         }
                                                     }
@@ -1508,8 +1558,7 @@ fun AuralisApp(
                                                     coroutineScope.launch {
                                                         val tracks = searchVM.getAlbumTracks(album)
                                                         if (tracks.isNotEmpty()) {
-                                                            val shuffled = tracks.shuffled()
-                                                            obtainPlayerViewModel().playTrack(shuffled.first(), shuffled, 0)
+                                                            shuffleControl.shufflePlay(tracks) { first, list -> obtainPlayerViewModel().playTrack(first, list, list.indexOf(first)) }
                                                             android.widget.Toast.makeText(context, str(R.string.shuffling_x, album.title), android.widget.Toast.LENGTH_SHORT).show()
                                                         }
                                                     }
@@ -1723,6 +1772,7 @@ fun AuralisApp(
                                     }
                                 }
                             }
+                        }
                         }
                         }
                         // Keep one glass surface stationary while its page content transitions.
@@ -2111,8 +2161,8 @@ fun AuralisApp(
             val playerContentGlass = com.kyant.backdrop.backdrops.rememberLayerBackdrop()
             val playerOverlayBackdrop = com.kyant.backdrop.backdrops.rememberCombinedBackdrop(
                 combinedGlassBackdrop, playerBackgroundGlass, playerContentGlass)
-            val playerOverlayGlass = remember(playerOverlayBackdrop, glassIsDark) {
-                com.auralis.music.ui.glass.LiquidGlassContext(playerOverlayBackdrop, glassIsDark, dockCollapse)
+            val playerOverlayGlass = remember(playerOverlayBackdrop, glassIsDark, frostEnabled) {
+                com.auralis.music.ui.glass.LiquidGlassContext(playerOverlayBackdrop, glassIsDark, dockCollapse, frost = frostEnabled)
             }
 
             // Atmospheric background layer behind sheet (static fullscreen blurred artwork / gradient)
@@ -2141,6 +2191,9 @@ fun AuralisApp(
                         .graphicsLayer {
                             shape = playerSheetShape
                             clip = true
+                            // The fade applies to each draw instead of rendering the whole background into
+                            // an extra full-screen buffer every frame of the slide (the GPU was the bottleneck).
+                            compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.ModulateAlpha
                             val p = playerSheetProgress.value.coerceIn(0f, 1f)
                             alpha = if (reducedMotion) {
                                 if (isNowPlayingOpen || p > 0f) 1f else 0f
@@ -2170,7 +2223,7 @@ fun AuralisApp(
                                 .hazeSource(state = playerBackdropHazeState, zIndex = 0f),
                             isMiniPlayer = false,
                             isPlaying = playerUiState.isPlaying,
-                            canvasTrack = currentTrack,
+                            canvasTrack = currentTrack.takeIf { playerCanvasArmed },
                             spotifyTrackId = playerUiState.lyrics?.spotifyTrackId
                         )
                     }
@@ -2285,7 +2338,7 @@ fun AuralisApp(
                                     .hazeSource(state = playerBackdropHazeState, zIndex = 0f),
                                 isMiniPlayer = false,
                                 isPlaying = playerUiState.isPlaying,
-                                canvasTrack = currentTrack,
+                                canvasTrack = currentTrack.takeIf { playerCanvasArmed },
                                 spotifyTrackId = playerUiState.lyrics?.spotifyTrackId
                             )
                         }
@@ -2468,7 +2521,10 @@ fun AuralisApp(
                 }
 
                 // 2. Mini Player (Anchored strictly to bottom, touches only hit within its MiniPlayerHeight)
-                if (isMiniPlayerVisible) {
+                // Kept composed while the full player is open, parked below the screen so it takes no
+                // touches and draws nothing. Removing it at the end of every open and rebuilding it at
+                // the start of every close cost one 60-90 ms UI frame each way (release build trace).
+                run {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -2518,10 +2574,15 @@ fun AuralisApp(
                                     } else available
                                     val placeable = measurable.measure(constraints.copy(minWidth = width, maxWidth = width))
                                     layout(constraints.maxWidth, placeable.height) {
-                                        placeable.placeRelative(start + (available - width) / 2, 0)
+                                        placeable.placeRelative(start + (available - width) / 2,
+                                            if (isMiniPlayerVisible) 0 else fullHeightPx.toInt() * 2)
                                     }
                                 }
                             })
+                            // While parked, draw nothing: its endless animations (progress ring, live
+                            // background) otherwise had their layers rendered every frame behind the open
+                            // player even off screen (release trace: dozens of layers and textures a frame).
+                            .drawWithContent { if (isMiniPlayerVisible) drawContent() }
                             .graphicsLayer {
                                 val p = playerSheetProgress.value.coerceIn(0f, 1f)
                                 val dismissY = dismissOffsetY.value
@@ -2701,6 +2762,7 @@ fun AuralisApp(
                         contentAlignment = Alignment.BottomCenter
                     ) {
                         WithPlayerUiState(playerUiStateHolder) { fullPlayerUiState ->
+                            androidx.compose.runtime.CompositionLocalProvider(com.auralis.music.ui.player.LocalMiniPlayerOnScreen provides isMiniPlayerVisible) {
                             MiniPlayerHost(
                                 playerViewModel = activePV,
                                 playerUiState = fullPlayerUiState,
@@ -2735,6 +2797,7 @@ fun AuralisApp(
                                 skipLocked = { skipLocked() },
                                 requestGuestPlay = { track -> playOrRequest(track) {} }
                             )
+                            }
                         }
                     }
                 }
