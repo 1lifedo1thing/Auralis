@@ -138,6 +138,7 @@ fun main(args: Array<String>) {
     Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
         Log.e(TAG, "Fatal uncaught exception on thread '${thread.name}': ${throwable.message}", throwable)
         runCatching { singleInstanceLock?.close() }
+        ExitGuard.arm()
         kotlin.system.exitProcess(1)
     }
 
@@ -380,14 +381,28 @@ fun main(args: Array<String>) {
                 minHeight = minWindowHeight(isMac),
             )
         }
+        // Windows: a window saved maximized is created at the full work-area size instead of its restored
+        // size. It used to be created at the restored size and maximized only when shown, so the whole
+        // app was composed and laid out at 1307x726 first (~1.9s, trace-frames C1230 L685, 2026-11-27)
+        // and then again at full size. Its restored bounds are put back after it maximizes.
+        val startMaximizedOn = remember {
+            if (isMac || savedWindowState.placement != WindowPlacement.Maximized) null
+            else currentUsableScreenBounds().let { screens ->
+                val pos = savedWindowState.position as? androidx.compose.ui.window.WindowPosition.Absolute
+                val cx = pos?.let { it.x.value + savedWindowState.size.width.value / 2f }
+                val cy = pos?.let { it.y.value + savedWindowState.size.height.value / 2f }
+                screens.firstOrNull { s -> cx != null && cy != null && cx in s.x..(s.x + s.width) && cy in s.y..(s.y + s.height) }
+                    ?: screens.firstOrNull()
+            }
+        }
         val windowState = rememberWindowState(
             placement = if (isMac && savedWindowState.placement == WindowPlacement.Fullscreen) {
                 WindowPlacement.Floating
             } else {
                 savedWindowState.placement
             },
-            size = savedWindowState.size,
-            position = savedWindowState.position
+            size = startMaximizedOn?.let { androidx.compose.ui.unit.DpSize(it.width.dp, it.height.dp) } ?: savedWindowState.size,
+            position = startMaximizedOn?.let { androidx.compose.ui.window.WindowPosition.Absolute(it.x.dp, it.y.dp) } ?: savedWindowState.position
         )
         var persistedWindowState by remember {
             mutableStateOf(
@@ -520,9 +535,40 @@ fun main(args: Array<String>) {
         LaunchedEffect(mainWindowShown, windowState.isMinimized) {
             com.auralis.music.windows.connect.DesktopConnect.windowShown = mainWindowShown && !windowState.isMinimized
         }
+        // In the tray or minimized for a while (not immersive mode, which draws), memory goes back to Windows.
+        LaunchedEffect(windowVisible, windowState.isMinimized, immersive.trigger == null) {
+            if ((windowVisible && !windowState.isMinimized) || immersive.trigger != null) return@LaunchedEffect
+            kotlinx.coroutines.delay(15_000)
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { com.auralis.music.windows.media.WorkingSetTrim.trim() }
+        }
+        // Open but behind other windows for a minute (the usual way music plays), memory goes back too:
+        // 2026-11-28 the visible, unfocused app sat at 1071 MB with a 148 MB heap. Once per stretch
+        // in the background; what it still uses comes straight back from memory.
+        LaunchedEffect(Unit) {
+            var inactiveSince = 0L
+            var trimmedThisStretch = false
+            while (true) {
+                kotlinx.coroutines.delay(10_000)
+                val active = composeWindow?.isActive == true
+                val now = System.currentTimeMillis()
+                if (active) { inactiveSince = 0L; trimmedThisStretch = false; continue }
+                if (inactiveSince == 0L) inactiveSince = now
+                if (!trimmedThisStretch && windowVisible && !windowState.isMinimized && immersive.trigger == null &&
+                    now - inactiveSince >= 60_000L) {
+                    trimmedThisStretch = true
+                    // No full GC here: the window is still on screen (lyrics may be animating).
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { com.auralis.music.windows.media.WorkingSetTrim.trim(collect = false) }
+                }
+            }
+        }
         var components by remember { mutableStateOf<ReadyComponents?>(null) }
         // Shown again from the tray, the window stays cloaked until it has drawn (see setWindowCloaked).
         var revealPending by remember { mutableStateOf(false) }
+        // The window opens cloaked and appears once the app draws smoothly at its final size. Shown at
+        // once, it laid out at the restored width inside the maximized window for ~1.5s, then jumped,
+        // and its title bar (above the startup cover) filled in piece by piece: logo, search, account
+        // name, avatar (screen recording 2026-11-27).
+        var startupCloaked by remember { mutableStateOf(!isMac && !launchMinimized) }
 
         LaunchedEffect(Unit) {
             components = componentsDeferred.await()
@@ -583,6 +629,7 @@ fun main(args: Array<String>) {
         }
 
         val closeApp: () -> Unit = {
+            ExitGuard.arm()
             runCatching { flushWindowState() }
             runCatching { systemTray?.close() }
             runCatching { composeWindow?.isVisible = false }
@@ -752,8 +799,36 @@ fun main(args: Array<String>) {
             state = windowState
         ) {
             // Cloaking preserves the Compose scene while the screensaver owns the display.
-            LaunchedEffect(immersive.trigger, windowVisible, embeddedImmersive) {
-                setWindowCloaked(window.windowHandle, immersive.trigger != null && !embeddedImmersive)
+            LaunchedEffect(immersive.trigger, windowVisible, embeddedImmersive, startupCloaked) {
+                val cloak = startupCloaked || (immersive.trigger != null && !embeddedImmersive)
+                val ok = setWindowCloaked(window.windowHandle, cloak)
+                if (immersive.trigger == null) Log.i(TAG, "Window cloak=$cloak ok=$ok showing=${window.isShowing} ${System.currentTimeMillis() - launchStarted}ms after launch")
+            }
+            // Never left invisible: a very slow cold start still shows the window after 8s.
+            LaunchedEffect(Unit) {
+                kotlinx.coroutines.delay(8_000)
+                startupCloaked = false
+            }
+            // Created at full size (see startMaximizedOn): once Windows has maximized it, its restore
+            // bounds go back to the saved restored size and position.
+            LaunchedEffect(window) {
+                val screen = startMaximizedOn ?: return@LaunchedEffect
+                kotlinx.coroutines.withTimeoutOrNull(10_000) {
+                    while (!(window.isShowing && window.extendedState and java.awt.Frame.MAXIMIZED_BOTH == java.awt.Frame.MAXIMIZED_BOTH)) withFrameNanos { }
+                    val size = savedWindowState.size
+                    val pos = savedWindowState.position as? androidx.compose.ui.window.WindowPosition.Absolute
+                    val x = pos?.x?.value ?: (screen.x + (screen.width - size.width.value) / 2f)
+                    val y = pos?.y?.value ?: (screen.y + (screen.height - size.height.value) / 2f)
+                    setRestoreBounds(window, screen.x, screen.y, x, y, size.width.value, size.height.value)
+                }
+            }
+            // Revealed, the whole app (title bar too) eases in from slightly small and transparent.
+            // It starts only once frames come smoothly (see appSettled), so the motion itself is smooth.
+            val openReveal = remember { androidx.compose.animation.core.Animatable(if (startupCloaked) 0f else 1f) }
+            LaunchedEffect(startupCloaked) {
+                if (startupCloaked || openReveal.value >= 1f) return@LaunchedEffect
+                withFrameNanos { } // the uncloaked window's first frame shows the start of the motion
+                openReveal.animateTo(1f, androidx.compose.animation.core.tween(280, easing = androidx.compose.animation.core.FastOutSlowInEasing))
             }
             LaunchedEffect(embeddedImmersive) {
                 if (embeddedImmersive) {
@@ -914,8 +989,10 @@ fun main(args: Array<String>) {
                         com.auralis.music.windows.dev.StartupSampler.sampleResizeIfRequested(dataDir)
                         com.auralis.music.windows.dev.GpuExperiment.runIfRequested(dataDir, window)
                     }
-                    override fun componentShown(e: java.awt.event.ComponentEvent) =
+                    override fun componentShown(e: java.awt.event.ComponentEvent) {
+                        Log.i(TAG, "Window shown (cloaked=${isWindowCloaked(window.windowHandle)}) ${System.currentTimeMillis() - launchStarted}ms after launch")
                         com.auralis.music.windows.dev.StartupSampler.windowEventIfRequested(dataDir, "shown")
+                    }
                     override fun componentHidden(e: java.awt.event.ComponentEvent) =
                         com.auralis.music.windows.dev.StartupSampler.windowEventIfRequested(dataDir, "hidden")
                 })
@@ -998,15 +1075,19 @@ fun main(args: Array<String>) {
                 if (ready == null) return@LaunchedEffect
                 val first = withFrameNanos { it }
                 Log.i(TAG, "UI shown ${System.currentTimeMillis() - launchStarted}ms after launch")
+                // Settled = every frame under 25ms for 350ms straight (3s ceiling). Four quick frames
+                // weren't enough: late covers and data kept making 60-76ms frames right after, and the
+                // reveal animation stuttered through them (recording + trace-frames, 2026-11-27).
                 var last = first
-                var smooth = 0
-                while (smooth < 4 && last - first < 2_000_000_000L) {
+                var smoothSince = first
+                while (last - smoothSince < 350_000_000L && last - first < 3_000_000_000L) {
                     val now = withFrameNanos { it }
-                    smooth = if (now - last < 40_000_000L) smooth + 1 else 0
+                    if (now - last >= 25_000_000L) smoothSince = now
                     last = now
                 }
                 Log.i(TAG, "UI settled ${System.currentTimeMillis() - launchStarted}ms after launch")
                 appSettled = true
+                startupCloaked = false
             }
             val coverAlpha = androidx.compose.animation.core.animateFloatAsState(if (appSettled) 0f else 1f,
                 androidx.compose.animation.core.tween(160), label = "startupCover")
@@ -1029,7 +1110,14 @@ fun main(args: Array<String>) {
                     drawContent()
                     com.auralis.music.windows.dev.FrameLog.drawFinished()
                 } else Modifier)) {
-                Box(Modifier.fillMaxSize().layout { measurable, constraints ->
+                Box(Modifier.fillMaxSize().graphicsLayer {
+                    // Read here (draw phase), so the reveal never recomposes the app.
+                    // Scale only: a fading alpha made Skia composite the whole window offscreen each
+                    // frame. The fade is a scrim drawn over the app instead (see below).
+                    val t = openReveal.value
+                    scaleX = 0.965f + 0.035f * t
+                    scaleY = scaleX
+                }.layout { measurable, constraints ->
                     val appConstraints = if (embeddedCoverActive) retainedAppConstraints.get() ?: constraints
                         else constraints.also { retainedAppConstraints.set(it) }
                     val content = measurable.measure(appConstraints)
@@ -1093,6 +1181,11 @@ fun main(args: Array<String>) {
                 )
                 }
                 }
+                // The opening fade: a scrim over the whole window (title bar too), read in the draw phase.
+                androidx.compose.foundation.layout.Spacer(Modifier.fillMaxSize().drawBehind {
+                    val a = 1f - openReveal.value
+                    if (a > 0f) drawRect(Color(0xFF0F0E13), alpha = a)
+                })
                 if (showStartupCover) Box(Modifier.fillMaxSize().padding(top = TITLE_BAR_HEIGHT)
                     .graphicsLayer { alpha = coverAlpha.value }.background(Color(0xFF0F0E13))
                     // Clicks don't reach controls that aren't visible yet.

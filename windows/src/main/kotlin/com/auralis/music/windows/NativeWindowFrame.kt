@@ -359,8 +359,40 @@ internal class NativeWindowFrame(private val window: Window, handle: Long,
  * the tray, an OpenGL window displayed black until Skia's first buffer swap; cloaked, it draws that
  * frame unseen and appears with its content.
  */
+/** DWMWA_CLOAKED: nonzero when the window is cloaked (by the app, the shell or another desktop). */
+internal fun isWindowCloaked(handle: Long): Int = runCatching {
+    val value = Memory(4).apply { setInt(0, 0) }
+    NativeLibrary.getInstance("dwmapi").getFunction("DwmGetWindowAttribute").invokeInt(arrayOf(Pointer(handle), 14, value, 4))
+    value.getInt(0)
+}.getOrDefault(-1)
+
 internal fun setWindowCloaked(handle: Long, cloaked: Boolean) = runCatching {
     val value = Memory(4).apply { setInt(0, if (cloaked) 1 else 0) }
     NativeLibrary.getInstance("dwmapi").getFunction("DwmSetWindowAttribute")
         .invokeInt(arrayOf(Pointer(handle), 13, value, 4)) == 0
 }.getOrDefault(false)
+
+/**
+ * Sets where a maximized window goes when restored (Windows), keeping it maximized. The window was
+ * created at the work area's full size at ([createdX], [createdY]) (see startMaximizedOn in Main.kt),
+ * so its current restore rectangle sits there; the saved restored bounds (all in AWT units) are placed
+ * relative to it, which avoids converting between screen and workspace coordinates.
+ */
+internal fun setRestoreBounds(window: androidx.compose.ui.awt.ComposeWindow, createdX: Float, createdY: Float, x: Float, y: Float, width: Float, height: Float) {
+    runCatching {
+        val user32 = com.sun.jna.platform.win32.User32.INSTANCE
+        val hwnd = com.sun.jna.platform.win32.WinDef.HWND(Pointer(window.windowHandle))
+        val placement = com.sun.jna.platform.win32.WinUser.WINDOWPLACEMENT()
+        check(user32.GetWindowPlacement(hwnd, placement).booleanValue())
+        val scale = window.graphicsConfiguration?.defaultTransform?.scaleX ?: 1.0
+        val normal = placement.rcNormalPosition
+        val left = normal.left + Math.round((x - createdX) * scale).toInt()
+        val top = normal.top + Math.round((y - createdY) * scale).toInt()
+        normal.left = left
+        normal.top = top
+        normal.right = left + Math.round(width * scale).toInt()
+        normal.bottom = top + Math.round(height * scale).toInt()
+        placement.showCmd = com.sun.jna.platform.win32.WinUser.SW_SHOWMAXIMIZED
+        check(user32.SetWindowPlacement(hwnd, placement).booleanValue())
+    }.onFailure { com.auralis.music.util.Log.w("AuralisWindow", "Restore bounds not set: ${it.message}") }
+}
